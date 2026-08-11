@@ -757,7 +757,7 @@ describe("imageGenTool", () => {
 		const ctx = createAntigravityXAIContext(undefined, fetchMock);
 
 		await expect(
-			imageGenTool.execute("call-excluded-providers", { subject: "a cat" }, undefined, ctx),
+			imageGenTool.execute("call-excluded-providers", { subject: "a cat", provider: "xai" }, undefined, ctx),
 		).rejects.toThrow("No image API credentials found");
 		expect(fetchCount).toBe(0);
 	});
