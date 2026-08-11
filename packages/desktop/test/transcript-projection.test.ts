@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { TranscriptStore } from "../src/main/transcript-store";
 import type { TimelineItem } from "../src/shared/contracts";
-import { outputPath, projectTimeline, workOutputItems } from "../src/shared/projection";
+import { changedFiles, projectTimeline } from "../src/shared/projection";
 
 describe("TranscriptStore", () => {
 	it("pairs tool results with streamed tool calls and preserves unknown events", () => {
@@ -73,6 +73,36 @@ describe("TranscriptStore", () => {
 			images: [{ data: image.data, mimeType: image.mimeType }],
 		});
 		expect(complete?.detail).not.toContain(image.data);
+	});
+	it("projects workspace file changes from write paths and multi-file edit patches", () => {
+		const store = new TranscriptStore();
+		const write = store.apply({
+			type: "tool_execution_start",
+			toolCallId: "write-1",
+			toolName: "write",
+			args: { path: "result.txt" },
+		});
+		const edit = store.apply({
+			type: "tool_execution_start",
+			toolCallId: "edit-1",
+			toolName: "edit",
+			args: {
+				input: "*** Begin Patch\n[src/one.ts#A1B2]\nPUT 1.=1:\n+one\n[src/two.ts#C3D4]\nPUT 1.=1:\n+two\n[src/one.ts#A1B2]\nPUT 2.=2:\n+again\n*** End Patch",
+			},
+		});
+		const virtualWrite = store.apply({
+			type: "tool_execution_start",
+			toolCallId: "write-virtual",
+			toolName: "write",
+			args: { path: "xd://browser" },
+		});
+
+		expect(write?.files).toEqual([{ path: "result.txt", operation: "write" }]);
+		expect(edit?.files).toEqual([
+			{ path: "src/one.ts", operation: "edit" },
+			{ path: "src/two.ts", operation: "edit" },
+		]);
+		expect(virtualWrite?.files).toBeUndefined();
 	});
 
 	it("streams one stable reasoning item before the assistant answer", () => {
@@ -146,6 +176,18 @@ describe("audience projections", () => {
 			text: "write",
 			toolName: "write",
 			args: { path: "result.txt" },
+			files: [{ path: "result.txt", operation: "write" }],
+			status: "complete",
+		},
+		{
+			id: "edit-ok",
+			kind: "tool",
+			text: "edit",
+			toolName: "edit",
+			files: [
+				{ path: "src/one.ts", operation: "edit" },
+				{ path: "result.txt", operation: "edit" },
+			],
 			status: "complete",
 		},
 		{
@@ -153,7 +195,7 @@ describe("audience projections", () => {
 			kind: "tool",
 			text: "edit",
 			toolName: "edit",
-			args: { path: "bad.txt" },
+			files: [{ path: "bad.txt", operation: "edit" }],
 			status: "error",
 			isError: true,
 		},
@@ -167,13 +209,20 @@ describe("audience projections", () => {
 		},
 	];
 
-	it("only exposes successful explicit write/edit outputs in Work", () => {
-		const outputs = workOutputItems(items);
-		expect(outputs.map(outputPath)).toEqual(["result.txt"]);
+	it("lists each successfully changed workspace file once, newest first", () => {
+		expect(changedFiles(items)).toEqual([
+			{ path: "result.txt", operation: "edit" },
+			{ path: "src/one.ts", operation: "edit" },
+		]);
 	});
 
-	it("removes tool payloads from Work projection but keeps Code details", () => {
-		expect(projectTimeline("work", items)[0]).toMatchObject({ id: "write-ok", args: undefined, result: undefined });
+	it("removes tool payloads from Work projection but keeps file metadata and Code details", () => {
+		expect(projectTimeline("work", items)[0]).toMatchObject({
+			id: "write-ok",
+			args: undefined,
+			result: undefined,
+			files: [{ path: "result.txt", operation: "write" }],
+		});
 		expect(projectTimeline("code", items)[0].args).toEqual({ path: "result.txt" });
 	});
 });

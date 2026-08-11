@@ -184,6 +184,17 @@ function registerIpc(desktopHost: DesktopHost): void {
 		assertTrustedSender(event);
 		return desktopHost.getAvailableModels(id);
 	});
+	ipcMain.handle("branchlight:openrouter-model-routing", (event, id: unknown, modelId: unknown) => {
+		assertTrustedSender(event);
+		return desktopHost.getOpenRouterModelRouting(id, modelId);
+	});
+	ipcMain.handle(
+		"branchlight:set-openrouter-provider-enabled",
+		(event, id: unknown, modelId: unknown, providerId: unknown, enabled: unknown) => {
+			assertTrustedSender(event);
+			return desktopHost.setOpenRouterProviderEnabled(id, modelId, providerId, enabled);
+		},
+	);
 	ipcMain.handle("branchlight:stop", (event, id: unknown) => {
 		assertTrustedSender(event);
 		return desktopHost.stop(id);
@@ -243,6 +254,10 @@ function registerIpc(desktopHost: DesktopHost): void {
 	ipcMain.handle("branchlight:subagent-messages", (event, id: unknown, subagentId: unknown, fromByte: unknown) => {
 		assertTrustedSender(event);
 		return desktopHost.getSubagentMessages(id, subagentId, fromByte);
+	});
+	ipcMain.handle("branchlight:file-diff", (event, id: unknown, target: unknown) => {
+		assertTrustedSender(event);
+		return desktopHost.loadFileDiff(id, target);
 	});
 	ipcMain.handle("branchlight:open-workspace-file", (event, id: unknown, target: unknown) => {
 		assertTrustedSender(event);

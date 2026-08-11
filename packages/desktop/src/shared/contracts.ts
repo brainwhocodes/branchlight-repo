@@ -4,6 +4,7 @@ export type ThinkingLevel = "inherit" | "off" | "minimal" | "low" | "medium" | "
 export type QueueMode = "all" | "one-at-a-time";
 export type InterruptMode = "immediate" | "wait";
 export type SlashCommandSource = "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file";
+export type ModelInputModality = "text" | "image";
 
 export interface SlashCommand {
 	name: string;
@@ -19,7 +20,19 @@ export interface ModelOption {
 	id: string;
 	name: string;
 	reasoning: boolean;
+	input: ModelInputModality[];
 	contextWindow?: number;
+}
+
+export interface OpenRouterProviderOption {
+	id: string;
+	name: string;
+	enabled: boolean;
+}
+
+export interface OpenRouterModelRouting {
+	modelId: string;
+	providers: OpenRouterProviderOption[];
 }
 
 export type AgentSettingValue = boolean | string | number;
@@ -75,6 +88,25 @@ export interface TimelineImage {
 	mimeType: string;
 }
 
+export type FileChangeOperation = "write" | "edit";
+
+export interface TimelineFileChange {
+	path: string;
+	operation: FileChangeOperation;
+}
+
+export type FileDiffStatus = "modified" | "added" | "deleted" | "renamed" | "clean" | "binary" | "unavailable";
+
+export interface FileDiffView {
+	path: string;
+	diff: string;
+	status: FileDiffStatus;
+	additions: number;
+	deletions: number;
+	truncated: boolean;
+	message?: string;
+}
+
 export interface TimelineItem {
 	id: string;
 	kind: "user" | "assistant" | "thinking" | "tool" | "notice" | "todo" | "marker" | "raw";
@@ -87,6 +119,7 @@ export interface TimelineItem {
 	args?: unknown;
 	result?: unknown;
 	images?: TimelineImage[];
+	files?: TimelineFileChange[];
 	isError?: boolean;
 	timestamp?: string;
 }
@@ -216,6 +249,13 @@ export interface BranchlightApi {
 	loadTimelineItem(id: string, itemId: string): Promise<TimelineItem>;
 	getAvailableCommands(id: string): Promise<SlashCommand[]>;
 	getAvailableModels(id: string): Promise<ModelOption[]>;
+	getOpenRouterModelRouting(id: string, modelId: string): Promise<OpenRouterModelRouting>;
+	setOpenRouterProviderEnabled(
+		id: string,
+		modelId: string,
+		providerId: string,
+		enabled: boolean,
+	): Promise<OpenRouterModelRouting>;
 	stop(id: string): Promise<SessionSnapshot>;
 	rename(id: string, title: string): Promise<SessionSnapshot>;
 	prompt(id: string, text: string): Promise<void>;
@@ -231,6 +271,7 @@ export interface BranchlightApi {
 	setAutoRetry(id: string, enabled: boolean): Promise<void>;
 	extensionResponse(id: string, response: unknown): Promise<void>;
 	getSubagentMessages(id: string, subagentId: string, fromByte: number): Promise<unknown>;
+	loadFileDiff(id: string, target: string): Promise<FileDiffView>;
 	openWorkspaceFile(id: string, target: string): Promise<void>;
 	openExternal(url: string): Promise<void>;
 	minimizeWindow(): Promise<void>;

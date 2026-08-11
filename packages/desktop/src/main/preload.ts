@@ -7,8 +7,10 @@ import type {
 	BootstrapSnapshot,
 	BranchlightApi,
 	BranchlightEvent,
+	FileDiffView,
 	InterruptMode,
 	ModelOption,
+	OpenRouterModelRouting,
 	QueueMode,
 	SessionSnapshot,
 	SlashCommand,
@@ -122,6 +124,22 @@ const api: BranchlightApi = {
 		ipcRenderer.invoke("branchlight:available-commands", sessionId(id)) as Promise<SlashCommand[]>,
 	getAvailableModels: id =>
 		ipcRenderer.invoke("branchlight:available-models", sessionId(id)) as Promise<ModelOption[]>,
+	getOpenRouterModelRouting: (id, modelId) =>
+		ipcRenderer.invoke(
+			"branchlight:openrouter-model-routing",
+			sessionId(id),
+			text(modelId, "model"),
+		) as Promise<OpenRouterModelRouting>,
+	setOpenRouterProviderEnabled: (id, modelId, providerId, enabled) => {
+		if (typeof enabled !== "boolean") throw new TypeError("provider enabled state must be boolean");
+		return ipcRenderer.invoke(
+			"branchlight:set-openrouter-provider-enabled",
+			sessionId(id),
+			text(modelId, "model"),
+			text(providerId, "provider"),
+			enabled,
+		) as Promise<OpenRouterModelRouting>;
+	},
 	stop: id => ipcRenderer.invoke("branchlight:stop", sessionId(id)) as Promise<SessionSnapshot>,
 	rename: (id, title) =>
 		ipcRenderer.invoke("branchlight:rename", sessionId(id), sessionName(title)) as Promise<SessionSnapshot>,
@@ -169,6 +187,12 @@ const api: BranchlightApi = {
 			fromByte,
 		) as Promise<unknown>;
 	},
+	loadFileDiff: (id, target) =>
+		ipcRenderer.invoke(
+			"branchlight:file-diff",
+			sessionId(id),
+			text(target, "file diff path"),
+		) as Promise<FileDiffView>,
 	openWorkspaceFile: (id, target) =>
 		ipcRenderer.invoke(
 			"branchlight:open-workspace-file",

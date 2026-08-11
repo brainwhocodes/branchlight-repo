@@ -36,10 +36,26 @@ const availableCommands = [
   { name: "fixture-release", description: "Prepare fixture release notes", source: "custom" },
 ];
 const modelOptions = [
-  { provider: "fixture", id: "fixture-model", name: "Fixture Model", reasoning: true, contextWindow: 4096 },
-  { provider: "fixture", id: "fast-model", name: "Fast Fixture", reasoning: true, contextWindow: 8192 },
-  { provider: "alternate", id: "compact-model", name: "Compact Fixture", reasoning: false, contextWindow: 2048 },
+  { provider: "fixture", id: "fixture-model", name: "Fixture Model", reasoning: true, input: ["text", "image"], contextWindow: 4096 },
+  { provider: "fixture", id: "fast-model", name: "Fast Fixture", reasoning: true, input: ["text"], contextWindow: 8192 },
+  { provider: "alternate", id: "compact-model", name: "Compact Fixture", reasoning: false, input: ["text"], contextWindow: 2048 },
+  { provider: "openrouter", id: "openai/gpt-4o", name: "GPT-4o via OpenRouter", reasoning: true, input: ["text", "image"], contextWindow: 128000 },
 ];
+const openRouterProviders = [
+  { id: "azure", name: "Azure" },
+  { id: "openai", name: "OpenAI" },
+];
+const disabledOpenRouterProviders = new Set();
+
+function openRouterRouting(modelId) {
+  return {
+    modelId,
+    providers: openRouterProviders.map(provider => ({
+      ...provider,
+      enabled: !disabledOpenRouterProviders.has(provider.id),
+    })),
+  };
+}
 let agentSettings = [
   {
     path: "personality",
@@ -197,6 +213,8 @@ input.on("line", line => {
     send({ type: "message_update", message: { id: answerId, role: "assistant", content: [{ type: "thinking", thinking: "Inspecting the fixture boundary." }] } });
     send({ type: "tool_execution_start", toolCallId: "fixture-write", toolName: "write", args: { path: "result.txt" } });
     send({ type: "tool_execution_end", toolCallId: "fixture-write", result: "BRANCHLIGHT_READY", isError: false });
+    send({ type: "tool_execution_start", toolCallId: "fixture-edit", toolName: "edit", args: { input: "*** Begin Patch\n[src/review.ts#A1B2]\nPUT 1.=1:\n+reviewed\n*** End Patch" } });
+    send({ type: "tool_execution_end", toolCallId: "fixture-edit", result: "Done!", isError: false });
     send({ type: "message_update", message: { id: answerId, role: "assistant", content: [{ type: "thinking", thinking: "Inspecting the fixture boundary.\nValidating the projected result." }] } });
     send({ type: "tool_execution_start", toolCallId: "fixture-image", toolName: "generate_image", args: { subject: "fixture image" } });
     send({ type: "tool_execution_update", toolCallId: "fixture-image", partialResult: { content: [{ type: "text", text: "Generating image…" }], details: { images: [] } } });
@@ -236,6 +254,12 @@ input.on("line", line => {
   });
   if (command.type === "get_available_commands") return response({ commands: availableCommands });
   if (command.type === "get_available_models") return response({ models: modelOptions });
+  if (command.type === "get_openrouter_model_routing") return response(openRouterRouting(command.modelId));
+  if (command.type === "set_openrouter_provider_enabled") {
+    if (command.enabled) disabledOpenRouterProviders.delete(command.providerId);
+    else disabledOpenRouterProviders.add(command.providerId);
+    return response(openRouterRouting(command.modelId));
+  }
   if (command.type === "get_login_providers") return response({
     providers: [
       { id: "openai-codex", name: "ChatGPT Plus/Pro", available: true, authenticated },
@@ -277,6 +301,16 @@ input.on("line", line => {
       } catch {}
     }
     return response({ providerId: "openai-codex" });
+  }
+  if (command.type === "get_file_diff") {
+    return response({
+      path: command.path,
+      diff: "diff --git a/result.txt b/result.txt\nnew file mode 100644\n--- /dev/null\n+++ b/result.txt\n@@ -0,0 +1 @@\n+Fixture result\n",
+      status: "added",
+      additions: 1,
+      deletions: 0,
+      truncated: false,
+    });
   }
   if (command.type === "get_messages_page") {
     const offset = command.cursor ? Number(command.cursor) : 0;

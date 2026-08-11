@@ -10,8 +10,10 @@ import type {
 	BootstrapSnapshot,
 	BranchlightEvent,
 	ExtensionView,
+	FileDiffView,
 	InterruptMode,
 	ModelOption,
+	OpenRouterModelRouting,
 	ProcessState,
 	QueueMode,
 	SessionRecordV1,
@@ -57,9 +59,11 @@ type RuntimeSession = {
 	queuedMessageCount?: number;
 	todoPhases?: SessionSnapshot["todoPhases"];
 	outstandingExtensions: Map<string, RpcExtensionUIRequest["method"]>;
+	fileDiffCache: Map<string, { expiresAt: number; request: Promise<FileDiffView> }>;
 };
 
 type TimerHandle = NodeJS.Timeout;
+const FILE_DIFF_CACHE_TTL_MS = 1_000;
 
 interface StateData {
 	sessionId: string;
@@ -283,6 +287,39 @@ export class DesktopHost {
 		runtime.models = models;
 		return [...models];
 	}
+	async getOpenRouterModelRouting(idInput: unknown, modelInput: unknown): Promise<OpenRouterModelRouting> {
+		const runtime = await this.#requireRunning(idInput);
+		const modelId = assertBoundedText(modelInput, "model").trim();
+		if (!modelId) throw new TypeError("invalid model");
+		const response = await runtime.process.client?.request({
+			type: "get_openrouter_model_routing",
+			modelId,
+		});
+		if (!response?.success) throw new Error(response?.error ?? "OpenRouter routes are unavailable");
+		return normalizeOpenRouterModelRouting(response.data);
+	}
+
+	async setOpenRouterProviderEnabled(
+		idInput: unknown,
+		modelInput: unknown,
+		providerInput: unknown,
+		enabledInput: unknown,
+	): Promise<OpenRouterModelRouting> {
+		const runtime = await this.#requireRunning(idInput);
+		const modelId = assertBoundedText(modelInput, "model").trim();
+		const providerId = assertBoundedText(providerInput, "provider").trim();
+		if (!modelId || !providerId || typeof enabledInput !== "boolean") {
+			throw new TypeError("invalid OpenRouter routing preference");
+		}
+		const response = await runtime.process.client?.request({
+			type: "set_openrouter_provider_enabled",
+			modelId,
+			providerId,
+			enabled: enabledInput,
+		});
+		if (!response?.success) throw new Error(response?.error ?? "OpenRouter route could not be updated");
+		return normalizeOpenRouterModelRouting(response.data);
+	}
 
 	async stop(id: unknown): Promise<SessionSnapshot> {
 		const record = this.#record(id);
@@ -450,6 +487,29 @@ export class DesktopHost {
 		if (!response?.success) throw new Error(response?.error ?? "subagent transcript unavailable");
 		return response.data;
 	}
+	async loadFileDiff(idInput: unknown, targetInput: unknown): Promise<FileDiffView> {
+		const target = assertBoundedText(targetInput, "file diff path").trim();
+		if (!target || target.length > 4_096) throw new TypeError("invalid file diff path");
+		const runtime = await this.#requireRunning(idInput);
+		const key = fileDiffCacheKey(target);
+		const cached = runtime.fileDiffCache.get(key);
+		if (cached && cached.expiresAt > Date.now()) return cached.request;
+
+		const client = runtime.process.client;
+		if (!client) throw new Error("OMP is not ready");
+		const request = client.request({ type: "get_file_diff", path: target }).then(response => {
+			if (!response.success) throw new Error(response.error ?? "File diff is unavailable");
+			return normalizeFileDiff(response.data);
+		});
+		const entry = { expiresAt: Date.now() + FILE_DIFF_CACHE_TTL_MS, request };
+		runtime.fileDiffCache.set(key, entry);
+		try {
+			return await request;
+		} catch (error) {
+			if (runtime.fileDiffCache.get(key) === entry) runtime.fileDiffCache.delete(key);
+			throw error;
+		}
+	}
 
 	async openWorkspaceFile(idInput: unknown, targetInput: unknown): Promise<void> {
 		const record = this.#record(idInput);
@@ -486,6 +546,7 @@ export class DesktopHost {
 		runtime.subagents = [];
 		runtime.commands = [];
 		runtime.outstandingExtensions = new Map();
+		runtime.fileDiffCache = new Map();
 		runtime.process = new RpcProcess({
 			cwd: record.cwd,
 			sessionFile: record.sessionFile || undefined,
@@ -763,6 +824,9 @@ export class DesktopHost {
 			return;
 		}
 		const items = runtime.timeline.applyChanges(event);
+		if (items.some(item => item.status === "complete" && item.isError !== true && item.files?.length)) {
+			runtime.fileDiffCache.clear();
+		}
 		for (const item of items) this.#queueEvent({ sessionId: runtime.record.id, type: "timeline", item });
 		if (frame.type === "notice" || frame.type === "command_output" || frame.type === "agent_end")
 			this.#flush(runtime.record.id);
@@ -975,16 +1039,101 @@ function toModelOption(value: unknown): ModelOption | undefined {
 		id: value.id,
 		name: typeof value.name === "string" && value.name.length <= 512 ? value.name : value.id,
 		reasoning: value.reasoning === true,
+		input: Array.isArray(value.input)
+			? [
+					...new Set(
+						value.input.filter(
+							(input): input is ModelOption["input"][number] => input === "text" || input === "image",
+						),
+					),
+				]
+			: ["text"],
 		contextWindow:
 			typeof value.contextWindow === "number" && Number.isSafeInteger(value.contextWindow) && value.contextWindow > 0
 				? value.contextWindow
 				: undefined,
 	};
 }
+function normalizeOpenRouterModelRouting(value: unknown): OpenRouterModelRouting {
+	if (
+		!isRecord(value) ||
+		typeof value.modelId !== "string" ||
+		value.modelId.length === 0 ||
+		value.modelId.length > 512 ||
+		!Array.isArray(value.providers) ||
+		value.providers.length > 512
+	) {
+		throw new Error("OpenRouter routing response was invalid");
+	}
+	const providers: OpenRouterModelRouting["providers"] = [];
+	const seen = new Set<string>();
+	for (const item of value.providers) {
+		if (
+			!isRecord(item) ||
+			typeof item.id !== "string" ||
+			item.id.length === 0 ||
+			item.id.length > 128 ||
+			typeof item.name !== "string" ||
+			item.name.length === 0 ||
+			item.name.length > 256 ||
+			typeof item.enabled !== "boolean" ||
+			seen.has(item.id)
+		) {
+			throw new Error("OpenRouter routing response was invalid");
+		}
+		seen.add(item.id);
+		providers.push({ id: item.id, name: item.name, enabled: item.enabled });
+	}
+	if (providers.length === 0) throw new Error("OpenRouter routing response did not include providers");
+	return { modelId: value.modelId, providers };
+}
 
 function dehydrateTimelineItem(item: TimelineItem): TimelineItem {
 	if (item.kind !== "thinking" || item.text.length <= 64 * 1024) return { ...item };
 	return { ...item, text: "Reasoning available. Open to load the full record.", textLoaded: false };
+}
+
+function normalizeFileDiff(value: unknown): FileDiffView {
+	if (
+		!isRecord(value) ||
+		typeof value.path !== "string" ||
+		typeof value.diff !== "string" ||
+		!isFileDiffStatus(value.status) ||
+		typeof value.additions !== "number" ||
+		!Number.isSafeInteger(value.additions) ||
+		value.additions < 0 ||
+		typeof value.deletions !== "number" ||
+		!Number.isSafeInteger(value.deletions) ||
+		value.deletions < 0 ||
+		typeof value.truncated !== "boolean"
+	)
+		throw new Error("File diff response was invalid");
+	return {
+		path: value.path,
+		diff: value.diff,
+		status: value.status,
+		additions: value.additions,
+		deletions: value.deletions,
+		truncated: value.truncated,
+		message: typeof value.message === "string" ? value.message : undefined,
+	};
+}
+
+function isFileDiffStatus(value: unknown): value is FileDiffView["status"] {
+	return (
+		value === "modified" ||
+		value === "added" ||
+		value === "deleted" ||
+		value === "renamed" ||
+		value === "clean" ||
+		value === "binary" ||
+		value === "unavailable"
+	);
+}
+
+function fileDiffCacheKey(target: string): string {
+	const normalized = target.replaceAll("\\", "/");
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function toSubagentView(value: unknown): SubagentView {

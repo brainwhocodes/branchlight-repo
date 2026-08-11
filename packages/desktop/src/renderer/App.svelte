@@ -1,9 +1,12 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import InfoCircle from "@solar-icons/svelte/linear/info-circle";
-  import type { AgentSettingTab, AgentSettingValue, AgentSettingView, AuthAccountView, AuthEvent, BranchlightEvent, BootstrapSnapshot, ExtensionView, InterruptMode, ModelOption, QueueMode, SessionKind, SessionSnapshot, SlashCommand, SubagentView, ThinkingLevel, TimelineItem } from "../shared/contracts";
-  import { outputPath, projectTimeline, workOutputItems } from "../shared/projection";
+  import type { AgentSettingTab, AgentSettingValue, AgentSettingView, AuthAccountView, AuthEvent, BootstrapSnapshot, BranchlightEvent, ExtensionView, FileDiffView, InterruptMode, ModelOption, OpenRouterModelRouting, QueueMode, SessionKind, SessionSnapshot, SlashCommand, SubagentView, ThinkingLevel, TimelineItem } from "../shared/contracts";
+  import { changedFiles, projectTimeline } from "../shared/projection";
   import BranchMark from "./components/BranchMark.svelte";
+  import FileDiffInspector from "./components/FileDiffInspector.svelte";
+  import ModelCapabilityIcons from "./components/ModelCapabilityIcons.svelte";
+  import OpenRouterModelAccordion from "./components/OpenRouterModelAccordion.svelte";
   import TimelineEntry from "./components/TimelineEntry.svelte";
   import { commandInsertion, searchSlashCommands, slashCommandQuery } from "./command-search";
   import CommandMenu from "./components/CommandMenu.svelte";
@@ -66,12 +69,24 @@
   let selectedCommandIndex = 0;
   let composerInput: HTMLTextAreaElement | undefined;
   let modelsLoading = false;
+  const EMPTY_PROVIDER_IDS = new Set<string>();
+  let expandedOpenRouterModel = "";
+  let openRouterRouting = new Map<string, OpenRouterModelRouting>();
+  let openRouterRoutingLoading = new Set<string>();
+  let openRouterRoutingErrors = new Map<string, string>();
+  let openRouterProviderBusy = new Map<string, Set<string>>();
   let settingsRefreshing = false;
   let settingsBusy = new Set<SettingKey>();
   let settingsStatusMessage = "";
   let agentSettings: AgentSettingView[] = [];
   let agentSettingsBusy = new Set<string>();
   let selectedAgentSettingsTab: AgentSettingTab = "model";
+  let selectedDiffPath = "";
+  let selectedDiff: FileDiffView | undefined;
+  let diffLoading = false;
+  let diffError = "";
+  let diffRequestToken = 0;
+  let inspectorPanel: HTMLElement | undefined;
 
   $: sessions = bootstrap?.registry.sessions.filter(session => session.kind === kind) ?? [];
   $: hasSessions = sessions.length > 0;
@@ -90,13 +105,13 @@
         renderedTimeline = timelineItems;
       } else {
         followTimeline = true;
-        void renderTimeline(timelineItems);
+        void renderTimeline(timelineItems, !sameSession, sessionId);
       }
     }
   }
   $: visibleTimeline = renderedTimeline;
   $: hiddenTimelineCount = current?.timelineStart ?? 0;
-  $: outputFiles = workOutputItems(current?.timeline ?? []);
+  $: outputFiles = changedFiles(current?.timeline ?? []);
   $: selectedAgent = current?.subagents.find(agent => agent.id === selectedSubagent);
   $: commandQuery = slashCommandQuery(draft);
   $: commandMatches = commandQuery === null ? [] : searchSlashCommands(availableCommands, commandQuery);
@@ -129,6 +144,8 @@
   });
 
   async function selectSession(id: string): Promise<void> {
+    resetFileDiff();
+    resetOpenRouterModelState();
     openReasoning = new Set();
     activeId = id;
     errorMessage = "";
@@ -138,11 +155,14 @@
       commandError = "";
       availableModels = [];
       if (bootstrap) bootstrap = { ...bootstrap, registry: { ...bootstrap.registry, activeByKind: { ...bootstrap.registry.activeByKind, [kind]: id } } };
+      await tick();
+      await scrollTimelineToEnd(true, id);
     } catch (error) { showError(error); }
   }
 
   async function selectKind(next: SessionKind): Promise<void> {
     kind = next;
+    resetFileDiff();
     selectedSubagent = "";
     subagentTranscript = "";
     const id = bootstrap?.registry.activeByKind[next] ?? bootstrap?.registry.sessions.find(session => session.kind === next)?.id;
@@ -155,6 +175,51 @@
       loading = false;
       availableCommands = [];
       availableModels = [];
+      resetOpenRouterModelState();
+    }
+  }
+
+  async function openFileDiff(path: string): Promise<void> {
+    if (!current) return;
+    const sessionId = current.record.id;
+    const requestToken = ++diffRequestToken;
+    selectedDiffPath = path;
+    selectedDiff = undefined;
+    diffLoading = true;
+    diffError = "";
+    await tick();
+    inspectorPanel?.focus();
+    try {
+      const result = await window.branchlight.loadFileDiff(sessionId, path);
+      if (requestToken !== diffRequestToken || current?.record.id !== sessionId) return;
+      selectedDiff = result;
+    } catch (error) {
+      if (requestToken !== diffRequestToken || current?.record.id !== sessionId) return;
+      diffError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (requestToken === diffRequestToken) diffLoading = false;
+    }
+  }
+
+  function resetFileDiff(): void {
+    diffRequestToken += 1;
+    selectedDiffPath = "";
+    selectedDiff = undefined;
+    diffLoading = false;
+    diffError = "";
+  }
+
+  function closeFileDiff(): void {
+    resetFileDiff();
+    void tick().then(() => inspectorPanel?.focus());
+  }
+
+  async function openSelectedFile(): Promise<void> {
+    if (!current || !selectedDiffPath) return;
+    try {
+      await window.branchlight.openWorkspaceFile(current.record.id, selectedDiffPath);
+    } catch (error) {
+      showError(error);
     }
   }
 
@@ -183,9 +248,13 @@
       loadingOlder = false;
     }
   }
-  async function renderTimeline(items: TimelineItem[]): Promise<void> {
+  async function renderTimeline(
+    items: TimelineItem[],
+    forceLatest = false,
+    sessionId = timelineSessionSource,
+  ): Promise<void> {
     const token = ++timelineRenderToken;
-    const shouldFollow = followTimeline;
+    const shouldFollow = forceLatest || followTimeline;
     renderedTimeline = [];
     for (let start = 0; start < items.length; start += 5) {
       if (token !== timelineRenderToken) return;
@@ -193,7 +262,9 @@
       renderedTimeline = items.slice(0, end);
       if (end < items.length) await nextAnimationFrame();
     }
-    if (token === timelineRenderToken && shouldFollow && followTimeline) await scrollTimelineToEnd();
+    if (token !== timelineRenderToken || sessionId !== timelineSessionSource) return;
+    if (forceLatest) await scrollTimelineToEnd(true, sessionId);
+    else if (shouldFollow && followTimeline) await scrollTimelineToEnd();
   }
 
   function timelineExtends(previous: TimelineItem[], next: TimelineItem[]): boolean {
@@ -214,10 +285,10 @@
     followTimeline = timelineAtBottom();
   }
 
-  async function scrollTimelineToEnd(): Promise<void> {
+  async function scrollTimelineToEnd(force = false, sessionId = timelineSessionSource): Promise<void> {
     const token = ++timelineScrollToken;
     await tick();
-    if (!timelineScroller || token !== timelineScrollToken) return;
+    if (!timelineScroller || sessionId !== timelineSessionSource || (!force && token !== timelineScrollToken)) return;
     timelineScroller.scrollTop = timelineScroller.scrollHeight;
     followTimeline = true;
   }
@@ -239,6 +310,7 @@
         if (bootstrap) bootstrap = { ...bootstrap, registry: { ...bootstrap.registry, sessions: [...bootstrap.registry.sessions, snapshot.record], activeByKind: { ...bootstrap.registry.activeByKind, [kind]: snapshot.record.id } } };
         availableCommands = snapshot.commands ?? [];
         availableModels = [];
+        resetOpenRouterModelState();
       }
     } catch (error) { showError(error); }
     finally { loading = false; }
@@ -468,6 +540,90 @@
     } finally {
       modelsLoading = false;
     }
+  }
+  function resetOpenRouterModelState(): void {
+    expandedOpenRouterModel = "";
+    openRouterRouting = new Map();
+    openRouterRoutingLoading = new Set();
+    openRouterRoutingErrors = new Map();
+    openRouterProviderBusy = new Map();
+  }
+
+  function toggleOpenRouterModel(model: ModelOption): void {
+    if (expandedOpenRouterModel === model.id) {
+      expandedOpenRouterModel = "";
+      return;
+    }
+    expandedOpenRouterModel = model.id;
+    if (!openRouterRouting.has(model.id) && !openRouterRoutingLoading.has(model.id)) {
+      void loadOpenRouterModelRouting(model.id);
+    }
+  }
+
+  async function loadOpenRouterModelRouting(modelId: string): Promise<void> {
+    if (!current || openRouterRoutingLoading.has(modelId)) return;
+    const sessionId = current.record.id;
+    openRouterRoutingLoading = new Set(openRouterRoutingLoading).add(modelId);
+    const errors = new Map(openRouterRoutingErrors);
+    errors.delete(modelId);
+    openRouterRoutingErrors = errors;
+    try {
+      const routing = await window.branchlight.getOpenRouterModelRouting(sessionId, modelId);
+      if (current?.record.id === sessionId) {
+        const next = new Map(openRouterRouting);
+        next.set(modelId, routing);
+        openRouterRouting = next;
+      }
+    } catch (error) {
+      if (current?.record.id === sessionId) {
+        const next = new Map(openRouterRoutingErrors);
+        next.set(modelId, error instanceof Error ? error.message : String(error));
+        openRouterRoutingErrors = next;
+      }
+    } finally {
+      const next = new Set(openRouterRoutingLoading);
+      next.delete(modelId);
+      openRouterRoutingLoading = next;
+    }
+  }
+
+  async function changeOpenRouterProvider(model: ModelOption, providerId: string, enabled: boolean): Promise<void> {
+    if (!current) return;
+    const sessionId = current.record.id;
+    const providerName = openRouterRouting.get(model.id)?.providers.find(provider => provider.id === providerId)?.name ?? providerId;
+    setOpenRouterProviderBusy(model.id, providerId, true);
+    const errors = new Map(openRouterRoutingErrors);
+    errors.delete(model.id);
+    openRouterRoutingErrors = errors;
+    try {
+      const routing = await window.branchlight.setOpenRouterProviderEnabled(sessionId, model.id, providerId, enabled);
+      if (current?.record.id === sessionId) {
+        const next = new Map(openRouterRouting);
+        next.set(model.id, routing);
+        openRouterRouting = next;
+        settingsStatusMessage = `${providerName} ${enabled ? "enabled" : "excluded"} for ${model.name}.`;
+      }
+    } catch (error) {
+      if (current?.record.id === sessionId) {
+        const message = error instanceof Error ? error.message : String(error);
+        const next = new Map(openRouterRoutingErrors);
+        next.set(model.id, message);
+        openRouterRoutingErrors = next;
+        settingsStatusMessage = message;
+      }
+    } finally {
+      setOpenRouterProviderBusy(model.id, providerId, false);
+    }
+  }
+
+  function setOpenRouterProviderBusy(modelId: string, providerId: string, busy: boolean): void {
+    const next = new Map(openRouterProviderBusy);
+    const providers = new Set(next.get(modelId) ?? EMPTY_PROVIDER_IDS);
+    if (busy) providers.add(providerId);
+    else providers.delete(providerId);
+    if (providers.size > 0) next.set(modelId, providers);
+    else next.delete(modelId);
+    openRouterProviderBusy = next;
   }
 
   function openSettings(): void {
@@ -802,6 +958,10 @@
   }
 
   function handleTranscriptKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape" && selectedDiffPath) {
+      closeFileDiff();
+      return;
+    }
     if (event.key === "Enter" || event.key === " ") handleTranscriptClick(event);
   }
 </script>
@@ -854,7 +1014,7 @@
           {#if current.timeline.length === 0 && current.state === "ready"}<div class="session-empty"><span class="empty-index">01</span><h3>{kind === "work" ? "What outcome should we pursue?" : "What should we inspect or change?"}</h3><p>{kind === "work" ? "Ask for research, a summary, a document, or a set of files." : "Ask for an implementation plan, a debug pass, or a review of the current tree."}</p><div class="suggestion-grid"><button onclick={() => draft = kind === "work" ? "Find the important documents in this workspace and explain them." : "Review the current repository for risks and open issues."}>{kind === "work" ? "Find important documents" : "Review repository risks"}<span>→</span></button><button onclick={() => draft = kind === "work" ? "Create a concise brief from the relevant files." : "Trace the main path and propose a safe fix."}>{kind === "work" ? "Create a concise brief" : "Trace a main path"}<span>→</span></button></div></div>{/if}
           {#if hiddenTimelineCount > 0}<button class="secondary-button older-entries" onclick={() => void revealOlder()} disabled={loadingOlder}>Load 100 older entries <span>({hiddenTimelineCount} remaining)</span></button>{/if}
           {#each visibleTimeline as item (item.id)}
-            <TimelineEntry item={item} kind={kind} reasoningLoading={reasoningLoading} openReasoning={openReasoning} onReasoning={loadReasoning} />
+            <TimelineEntry item={item} kind={kind} reasoningLoading={reasoningLoading} openReasoning={openReasoning} onReasoning={loadReasoning} onFile={openFileDiff} />
           {/each}
           {#if current.state === "starting"}<div class="lifecycle-card"><span class="spinner"></span><div><strong>Starting local runtime</strong><span>Loading OMP state and transcript…</span></div></div>{/if}
           {#if current.state === "running"}<div class="lifecycle-card live"><span class="pulse"></span><div><strong>Turn in progress</strong><span>{kind === "work" ? "Building the outcome…" : "Streaming technical work…"}</span></div></div>{/if}
@@ -926,14 +1086,49 @@
       {/if}
     </main>
 
-    <aside class="inspector" aria-label="Session inspector">
+    <aside
+      bind:this={inspectorPanel}
+      class="inspector"
+      aria-label={selectedDiffPath ? `Git diff for ${selectedDiffPath}` : "Session inspector"}
+      tabindex="-1"
+    >
       {#if current}
-        <section class="inspector-section"><div class="section-heading"><span class="eyebrow">Session</span><button class="icon-button" title="Toggle fast mode" aria-label="Toggle fast mode" class:active={current.fastMode} onclick={() => void changeSetting("fast", !current?.fastMode)}>速</button></div><div class="stats-grid"><div><span>Model</span><strong>{current.model?.split("/").pop() ?? "Provider default"}</strong></div><div><span>Thinking</span><strong>{current.thinkingLevel ?? "auto"}</strong></div><div><span>Context</span><strong>{current.contextTokens ? `${Math.round((current.contextTokens / (current.contextWindow ?? current.contextTokens)) * 100)}%` : "—"}</strong></div><div><span>Throughput</span><strong>{current.tokensPerSecond ? `${Math.round(current.tokensPerSecond)} t/s` : "—"}</strong></div></div></section>
-        {#if kind === "work"}<section class="inspector-section"><div class="section-heading"><span class="eyebrow">Outputs</span><span class="count-badge">{outputFiles.length}</span></div>{#if outputFiles.length === 0}<p class="muted-copy">Successful write and edit operations will appear here. Shell output is never guessed as an artifact.</p>{:else}<div class="output-list">{#each outputFiles as item (item.id)}{@const path = outputPath(item)}{#if path}<button onclick={() => void window.branchlight.openWorkspaceFile(current?.record.id ?? "", path)}><span class="file-mark">↳</span>{path}<span>↗</span></button>{/if}{/each}</div>{/if}</section>{/if}
-        <section class="inspector-section collaborators"><div class="section-heading"><span class="eyebrow">Collaborators</span><span class="count-badge">{current.subagents.length}</span></div>{#if current.subagents.length === 0}<p class="muted-copy">No subagents in this session.</p>{:else}<div class="agent-list">{#each current.subagents as agent (agent.id)}<button class:selected={selectedSubagent === agent.id} class="agent-card" onclick={() => void inspectSubagent(agent)}><span class="agent-icon">{agent.status === "running" ? "◌" : "✓"}</span><span><strong>{agent.agent}</strong><small>{agent.progress?.currentTool ?? agent.progress?.lastIntent ?? agent.status}</small></span><span class="agent-status">{agent.progress?.tokens ? `${agent.progress.tokens} tok` : agent.status}</span></button>{/each}</div>{/if}</section>
-        {#if selectedAgent}<section class="inspector-section agent-detail"><div class="section-heading"><span class="eyebrow">Subagent inspector</span><span class="mono">{selectedAgent.agent}</span></div><p>{selectedAgent.task ?? selectedAgent.assignment ?? "No assignment text"}</p>{#if selectedAgent.progress}<div class="agent-metrics"><span>{selectedAgent.progress.resolvedModel ?? "fallback"}</span><span>{selectedAgent.progress.cost !== undefined ? `$${selectedAgent.progress.cost.toFixed(3)}` : "—"}</span><span>{selectedAgent.progress.durationMs ? `${Math.round(selectedAgent.progress.durationMs / 1000)}s` : "—"}</span></div>{/if}<pre class="subagent-transcript">{subagentLoading ? "Loading transcript…" : subagentTranscript || "No transcript bytes yet."}</pre></section>{/if}
-        <section class="inspector-section technical-summary"><details><summary>Technical details</summary><dl><dt>Session ID</dt><dd>{current.record.ompSessionId || "pending"}</dd><dt>Session file</dt><dd>{current.record.sessionFile || "pending"}</dd><dt>Kind</dt><dd>{current.record.kind}</dd></dl></details></section>
-      {:else}<div class="inspector-empty"><span class="eyebrow">Inspector</span><p>Select a session to see state, outputs, collaborators, and technical details.</p></div>{/if}
+        {#if selectedDiffPath}
+          <FileDiffInspector
+            path={selectedDiffPath}
+            diff={selectedDiff}
+            loading={diffLoading}
+            error={diffError}
+            onClose={closeFileDiff}
+            onOpenFile={openSelectedFile}
+          />
+        {:else}
+          <section class="inspector-section">
+            <div class="section-heading"><span class="eyebrow">Session</span><button class="icon-button" title="Toggle fast mode" aria-label="Toggle fast mode" class:active={current.fastMode} onclick={() => void changeSetting("fast", !current?.fastMode)}>速</button></div>
+            <div class="stats-grid"><div><span>Model</span><strong>{current.model?.split("/").pop() ?? "Provider default"}</strong></div><div><span>Thinking</span><strong>{current.thinkingLevel ?? "auto"}</strong></div><div><span>Context</span><strong>{current.contextTokens ? `${Math.round((current.contextTokens / (current.contextWindow ?? current.contextTokens)) * 100)}%` : "—"}</strong></div><div><span>Throughput</span><strong>{current.tokensPerSecond ? `${Math.round(current.tokensPerSecond)} tok/s` : "—"}</strong></div></div>
+          </section>
+          <section class="inspector-section">
+            <div class="section-heading"><span class="eyebrow">Changes</span><span class="count-badge">{outputFiles.length}</span></div>
+            {#if outputFiles.length === 0}
+              <p class="muted-copy">Successful file edits and writes will appear here with an on-demand Git diff.</p>
+            {:else}
+              <div class="output-list">
+                {#each outputFiles as file (file.path)}
+                  <button aria-label={`View git diff for ${file.path}`} onclick={() => void openFileDiff(file.path)}><span class="file-mark">↳</span><code>{file.path}</code><span>{file.operation === "edit" ? "Edited" : "Wrote"}</span></button>
+                {/each}
+              </div>
+            {/if}
+          </section>
+          <section class="inspector-section collaborators">
+            <div class="section-heading"><span class="eyebrow">Collaborators</span><span class="count-badge">{current.subagents.length}</span></div>
+            {#if current.subagents.length === 0}<p class="muted-copy">No subagents in this session.</p>{:else}<div class="agent-list">{#each current.subagents as agent (agent.id)}<button class:selected={selectedSubagent === agent.id} class="agent-card" onclick={() => void inspectSubagent(agent)}><span class="agent-icon">{agent.status === "running" ? "◌" : "✓"}</span><span><strong>{agent.agent}</strong><small>{agent.progress?.currentTool ?? agent.progress?.lastIntent ?? agent.status}</small></span><span class="agent-status">{agent.progress?.tokens ? `${agent.progress.tokens} tok` : agent.status}</span></button>{/each}</div>{/if}
+          </section>
+          {#if selectedAgent}<section class="inspector-section agent-detail"><div class="section-heading"><span class="eyebrow">Subagent inspector</span><span class="mono">{selectedAgent.agent}</span></div><p>{selectedAgent.task ?? selectedAgent.assignment ?? "No assignment text"}</p>{#if selectedAgent.progress}<div class="agent-metrics"><span>{selectedAgent.progress.resolvedModel ?? "fallback"}</span><span>{selectedAgent.progress.cost !== undefined ? `$${selectedAgent.progress.cost.toFixed(3)}` : "—"}</span><span>{selectedAgent.progress.durationMs ? `${Math.round(selectedAgent.progress.durationMs / 1000)}s` : "—"}</span></div>{/if}<pre class="subagent-transcript">{subagentLoading ? "Loading transcript…" : subagentTranscript || "No transcript bytes yet."}</pre></section>{/if}
+          <section class="inspector-section technical-summary"><details><summary>Technical details</summary><dl><dt>Session ID</dt><dd>{current.record.ompSessionId || "pending"}</dd><dt>Session file</dt><dd>{current.record.sessionFile || "pending"}</dd><dt>Kind</dt><dd>{current.record.kind}</dd></dl></details></section>
+        {/if}
+      {:else}
+        <div class="inspector-empty"><span class="eyebrow">Inspector</span><p>Select a session to see state, changes, collaborators, and technical details.</p></div>
+      {/if}
     </aside>
   </div>
   {/if}
@@ -970,7 +1165,7 @@
                 <strong>{selectedModelOption?.name ?? current.model ?? "Provider default"}</strong>
                 <small>{selectedModelOption ? `${selectedModelOption.provider} / ${selectedModelOption.id}` : current.model ?? "Inherited from OMP"}</small>
               </div>
-              {#if selectedModelOption?.reasoning}<span class="model-badge">Reasoning</span>{/if}
+              {#if selectedModelOption}<ModelCapabilityIcons input={selectedModelOption.input} reasoning={selectedModelOption.reasoning} />{/if}
             </div>
             <div class="model-picker-controls">
               <label>
@@ -990,22 +1185,42 @@
             {:else if visibleModels.length === 0}
               <div class="settings-empty compact"><p>No models match these filters.</p></div>
             {:else}
-              <div class="model-results" role="listbox" aria-label="Available models">
+              <div class="model-results" aria-label="Available models">
                 {#each visibleModels as model (`${model.provider}:${model.id}`)}
                   {@const contextLabel = formatContextWindow(model.contextWindow)}
-                  <button
-                    type="button"
-                    class="model-option"
-                    class:selected={modelIdentifier(model) === current.model}
-                    role="option"
-                    aria-selected={modelIdentifier(model) === current.model}
-                    aria-label={`Use ${model.name} from ${model.provider}`}
-                    disabled={settingsBusy.has("model")}
-                    onclick={() => void changeModel(model)}
-                  >
-                    <span class="model-option-copy"><strong>{model.name}</strong><small>{model.provider} / {model.id}</small></span>
-                    <span class="model-badges">{#if model.reasoning}<span>Reasoning</span>{/if}{#if contextLabel}<span>{contextLabel}</span>{/if}</span>
-                  </button>
+                  {@const selected = modelIdentifier(model) === current.model}
+                  {#if model.provider === "openrouter"}
+                    <OpenRouterModelAccordion
+                      {model}
+                      {contextLabel}
+                      {selected}
+                      open={expandedOpenRouterModel === model.id}
+                      loading={openRouterRoutingLoading.has(model.id)}
+                      routing={openRouterRouting.get(model.id)}
+                      error={openRouterRoutingErrors.get(model.id) ?? ""}
+                      busyProviders={openRouterProviderBusy.get(model.id) ?? EMPTY_PROVIDER_IDS}
+                      modelChangeDisabled={settingsBusy.has("model")}
+                      onToggle={() => toggleOpenRouterModel(model)}
+                      onSelect={() => void changeModel(model)}
+                      onProviderChange={(providerId, enabled) => void changeOpenRouterProvider(model, providerId, enabled)}
+                    />
+                  {:else}
+                    <button
+                      type="button"
+                      class="model-option"
+                      class:selected
+                      aria-pressed={selected}
+                      aria-label={`Use ${model.name} from ${model.provider}`}
+                      disabled={settingsBusy.has("model")}
+                      onclick={() => void changeModel(model)}
+                    >
+                      <span class="model-option-copy"><strong>{model.name}</strong><small>{model.provider} / {model.id}</small></span>
+                      <span class="model-option-meta">
+                        <ModelCapabilityIcons input={model.input} reasoning={model.reasoning} />
+                        {#if contextLabel}<span class="model-context-badge">{contextLabel}</span>{/if}
+                      </span>
+                    </button>
+                  {/if}
                 {/each}
               </div>
               <p class="model-result-note">Showing {visibleModels.length} of {filteredModels.length} matching models{filteredModels.length > visibleModels.length ? " — refine your search to see more" : ""}.</p>

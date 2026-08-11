@@ -1,5 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
-import type { TimelineImage, TimelineItem } from "../shared/contracts";
+import type { TimelineFileChange, TimelineImage, TimelineItem } from "../shared/contracts";
 
 export class TranscriptStore {
 	#items: TimelineItem[] = [];
@@ -58,6 +58,7 @@ export class TranscriptStore {
 					toolName,
 					toolCallId,
 					args: frame.args,
+					files: extractFileChanges(toolName, frame.args),
 					status: "running",
 				};
 				this.#items.push(item);
@@ -66,6 +67,7 @@ export class TranscriptStore {
 				item.text = toolName ?? item.text;
 				item.toolName = toolName ?? item.toolName;
 				item.args = frame.args;
+				item.files = extractFileChanges(item.toolName, frame.args);
 				item.status = "running";
 				delete item.isError;
 			}
@@ -239,6 +241,7 @@ export class TranscriptStore {
 					toolName,
 					toolCallId,
 					args: candidate.arguments,
+					files: extractFileChanges(toolName, candidate.arguments),
 					status: "running",
 				};
 				this.#items.push(tool);
@@ -247,6 +250,7 @@ export class TranscriptStore {
 				tool.text = toolName ?? tool.text;
 				tool.toolName = toolName ?? tool.toolName;
 				tool.args = candidate.arguments;
+				tool.files = extractFileChanges(tool.toolName, candidate.arguments);
 			}
 			changes.push({ ...tool });
 		}
@@ -286,6 +290,31 @@ function normalizeToolName(value: unknown, args: unknown): string | undefined {
 	const name = typeof value === "string" ? value : undefined;
 	if (name !== "write" || !isRecord(args) || args.path !== "xd://generate_image") return name;
 	return "generate_image";
+}
+function extractFileChanges(toolName: string | undefined, args: unknown): TimelineFileChange[] | undefined {
+	if (!isRecord(args)) return undefined;
+	if (toolName === "write") {
+		const target = workspacePath(args.path);
+		return target ? [{ path: target, operation: "write" }] : undefined;
+	}
+	if (toolName !== "edit" || typeof args.input !== "string") return undefined;
+
+	const files: TimelineFileChange[] = [];
+	const seen = new Set<string>();
+	for (const match of args.input.matchAll(/^\[([^#\r\n]+)#[0-9A-F]{4}\]$/gim)) {
+		const target = workspacePath(match[1]);
+		if (!target || seen.has(target)) continue;
+		seen.add(target);
+		files.push({ path: target, operation: "edit" });
+	}
+	return files.length > 0 ? files : undefined;
+}
+
+function workspacePath(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const target = value.trim();
+	if (!target || /^[a-z][a-z0-9+.-]*:\/\//i.test(target)) return undefined;
+	return target;
 }
 function formatToolDetail(toolName: string | undefined, value: unknown): string {
 	if (toolName === "generate_image") return extractText(value) || formatValue(value);

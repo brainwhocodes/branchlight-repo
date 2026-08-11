@@ -7,6 +7,7 @@
   export let reasoningLoading: Set<string>;
   export let openReasoning: Set<string>;
   export let onReasoning: (item: TimelineItem) => void;
+  export let onFile: (path: string) => void;
 
   function toolLabel(value: TimelineItem): string {
     return value.toolName === "generate_image" ? "Generate image" : value.toolName ?? value.text;
@@ -30,7 +31,28 @@
   <div class="timeline-gutter"><span>{item.kind === "user" ? "YOU" : item.kind === "assistant" ? "OMP" : item.kind === "tool" ? "TOOL" : item.kind === "thinking" ? "THINK" : "LOG"}</span></div>
   <div class="timeline-body">
     {#if item.kind === "tool"}
-      <div class="activity-row"><span class="activity-icon">{item.status === "running" ? "◌" : item.status === "error" ? "!" : "✓"}</span><strong>{toolLabel(item)}</strong><span class="activity-status">{toolStatus(item)}</span></div>
+      <div class="activity-row">
+        <span class="activity-icon">{item.status === "running" ? "◌" : item.status === "error" ? "!" : "✓"}</span>
+        <strong>{toolLabel(item)}</strong>
+        <span class="activity-status">{toolStatus(item)}</span>
+      </div>
+      {#if item.files && item.files.length > 0}
+        <div class="file-change-list" aria-label="Changed files">
+          {#each item.files as file (file.path)}
+            <button
+              type="button"
+              class="file-change"
+              aria-label={`View git diff for ${file.path}`}
+              disabled={item.status !== "complete" || item.isError === true}
+              onclick={() => onFile(file.path)}
+            >
+              <span class="file-operation">{file.operation === "edit" ? "Edited" : "Wrote"}</span>
+              <code title={file.path}>{file.path}</code>
+              <span class="file-diff-action">View diff</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
       {#if item.images && item.images.length > 0}
         <div class="tool-images" aria-label="Generated images">
           {#each item.images as image, index (image.mimeType + ":" + index)}

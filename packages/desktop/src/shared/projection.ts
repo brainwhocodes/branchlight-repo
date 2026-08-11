@@ -1,4 +1,4 @@
-import type { SessionKind, TimelineItem } from "./contracts";
+import type { SessionKind, TimelineFileChange, TimelineItem } from "./contracts";
 
 export function projectTimeline(kind: SessionKind, items: readonly TimelineItem[]): TimelineItem[] {
 	if (kind === "code") return [...items];
@@ -7,24 +7,14 @@ export function projectTimeline(kind: SessionKind, items: readonly TimelineItem[
 	);
 }
 
-export function workOutputItems(items: readonly TimelineItem[]): TimelineItem[] {
-	return items.filter(item => {
-		if (
-			item.status !== "complete" ||
-			item.isError === true ||
-			(item.toolName !== "write" && item.toolName !== "edit")
-		)
-			return false;
-		return Boolean(readPath(item.args));
-	});
-}
-
-export function outputPath(item: TimelineItem): string | undefined {
-	return readPath(item.args);
-}
-
-function readPath(value: unknown): string | undefined {
-	if (typeof value !== "object" || value === null || !("path" in value)) return undefined;
-	const candidate = value as { path?: unknown };
-	return typeof candidate.path === "string" && candidate.path.length > 0 ? candidate.path : undefined;
+export function changedFiles(items: readonly TimelineItem[]): TimelineFileChange[] {
+	const latestByPath = new Map<string, TimelineFileChange>();
+	for (const item of items) {
+		if (item.status !== "complete" || item.isError === true || !item.files) continue;
+		for (const file of item.files) {
+			latestByPath.delete(file.path);
+			latestByPath.set(file.path, file);
+		}
+	}
+	return Array.from(latestByPath.values()).reverse();
 }

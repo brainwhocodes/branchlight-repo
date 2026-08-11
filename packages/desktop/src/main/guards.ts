@@ -57,7 +57,9 @@ export async function resolveWorkspaceTarget(
 	workspace: string,
 	target: string,
 ): Promise<{ workspace: string; target: string; revealOnly: boolean }> {
-	const [workspaceReal, targetReal] = await Promise.all([fs.realpath(workspace), fs.realpath(target)]);
+	const workspaceReal = await fs.realpath(workspace);
+	const targetPath = path.isAbsolute(target) ? target : path.resolve(workspaceReal, target);
+	const targetReal = await fs.realpath(targetPath);
 	const workspaceKey = normalizeForCompare(workspaceReal);
 	const targetKey = normalizeForCompare(targetReal);
 	if (targetKey !== workspaceKey && !targetKey.startsWith(`${workspaceKey}${path.sep}`))

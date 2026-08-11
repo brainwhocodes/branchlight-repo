@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -81,6 +81,10 @@ describe("guards", () => {
 		await writeFile(document, "note", "utf8");
 		await writeFile(script, "echo no", "utf8");
 
+		await expect(resolveWorkspaceTarget(directory, "note.md")).resolves.toMatchObject({
+			target: await realpath(document),
+			revealOnly: false,
+		});
 		await expect(resolveWorkspaceTarget(directory, path.join(directory, "missing.txt"))).rejects.toThrow();
 		await expect(
 			resolveWorkspaceTarget(directory, path.join(directory, "..", path.basename(directory), "note.md")),
