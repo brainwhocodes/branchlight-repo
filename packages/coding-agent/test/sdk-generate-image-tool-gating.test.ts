@@ -111,10 +111,10 @@ describe("generate_image tool gating", () => {
 		expect(names).toContain("generate_image");
 	});
 
-	it("exposes generate_image as an xd:// device (not top-level) in a default session", async () => {
-		// Default session (no explicit --tools) with tools.xdev on: image-gen is a
-		// discoverable custom tool, so it mounts as an xd:// device instead of
-		// shipping its schema top-level.
+	it("keeps generate_image top-level in a default enabled session", async () => {
+		// Image generation is intent-driven and must remain directly visible to
+		// the model instead of competing with programmatic graphics tools in the
+		// xd:// catalog.
 		const { session } = await createAgentSession({
 			cwd: registryDir,
 			agentDir: registryDir,
@@ -125,8 +125,8 @@ describe("generate_image tool gating", () => {
 			disableExtensionDiscovery: true,
 		});
 		sessions.push(session);
-		expect(session.getActiveToolNames()).not.toContain("generate_image");
-		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("generate_image");
+		expect(session.getActiveToolNames()).toContain("generate_image");
+		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("generate_image");
 	});
 
 	it("keeps ambient tools top-level across runtime selection without write", async () => {

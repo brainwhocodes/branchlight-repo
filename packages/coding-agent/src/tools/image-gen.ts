@@ -1122,6 +1122,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 	name: "generate_image",
 	label: "Image generation",
 	strict: false,
+	loadMode: "essential",
 	approval: "write",
 	description: prompt.render(imageGenDescription),
 	parameters: imageGenSchema,

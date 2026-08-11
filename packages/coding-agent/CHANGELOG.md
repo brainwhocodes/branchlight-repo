@@ -10,6 +10,10 @@
 - Changed ChatGPT/Codex subscription image generation to use the Codex Responses API's native `image_generation` tool, routed through the connected GPT model and backed by `gpt-image-2`; custom proxies keep their hosted Responses base URL.
 - Changed image generation to emit an immediate progress update while the provider is still generating the image.
 
+### Fixed
+
+- Fixed explicit image-generation requests choosing programmatic SVG or browser screenshot fallbacks instead of the native image generator.
+
 ## [17.2.12] - 2026-08-08
 
 ### Fixed

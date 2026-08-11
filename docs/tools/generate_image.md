@@ -11,7 +11,8 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 
 ## Enablement and Invocation
 - Image generation is opt-in. `generate_image.enabled` is disabled by default and is the sole persistent enablement setting; normal CLI tool disabling and explicit tool whitelists still apply.
-- For an explicit image-generation or image-edit request, invoke `generate_image` directly without asking for redundant confirmation.
+- When enabled, `generate_image` stays top-level so the model receives its schema directly rather than discovering it through the `xd://` catalog.
+- For an explicit image-generation or image-edit request, invoke `generate_image` directly without asking for redundant confirmation or substituting handcrafted SVG, HTML/canvas output, or browser screenshots unless the user explicitly requested programmatic/vector graphics.
 
 ## Inputs
 
