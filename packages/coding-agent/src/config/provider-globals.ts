@@ -1,10 +1,11 @@
-import { setImageProviderOrder } from "../tools/image-gen";
+import { setExcludedImageProviders, setImageProviderOrder } from "../tools/image-gen";
 import * as webSearch from "../web/search";
 
 interface ProviderGlobalSettings {
 	get(path: "providers.webSearchOrder"): unknown;
 	get(path: "providers.webSearchExclude"): unknown;
 	get(path: "providers.imageOrder"): unknown;
+	get(path: "providers.imageExclude"): unknown;
 }
 
 export function applyProviderGlobalsFromSettings(settings: ProviderGlobalSettings): void {
@@ -21,5 +22,10 @@ export function applyProviderGlobalsFromSettings(settings: ProviderGlobalSetting
 	const orderedImageProviders = settings.get("providers.imageOrder");
 	if (Array.isArray(orderedImageProviders)) {
 		setImageProviderOrder(orderedImageProviders.filter((entry): entry is string => typeof entry === "string"));
+	}
+
+	const excludedImageProviders = settings.get("providers.imageExclude");
+	if (Array.isArray(excludedImageProviders)) {
+		setExcludedImageProviders(excludedImageProviders.filter((entry): entry is string => typeof entry === "string"));
 	}
 }

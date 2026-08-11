@@ -445,6 +445,7 @@ function extractOpenRouterImageUrls(message: OpenRouterMessage | undefined): str
 
 /** Configured provider priority set via `providers.imageOrder` (default: none). */
 let configuredImageProviderOrder: readonly ImageProvider[] = [];
+let excludedImageProviders = new Set<ImageProvider>();
 
 export function isImageProviderPreference(value: unknown): value is ImageProviderPreference {
 	return typeof value === "string" && IMAGE_PROVIDER_PREFERENCES.has(value);
@@ -453,6 +454,11 @@ export function isImageProviderPreference(value: unknown): value is ImageProvide
 /** Set the configured image-provider priority from settings; invalid IDs are dropped. */
 export function setImageProviderOrder(providers: readonly string[]): void {
 	configuredImageProviderOrder = providers.filter(isImageProviderId);
+}
+
+/** Set image providers that must never be selected, including explicit per-request overrides. */
+export function setExcludedImageProviders(providers: readonly string[]): void {
+	excludedImageProviders = new Set(providers.filter(isImageProviderId));
 }
 function assertImageAspectRatioSupported(provider: ImageProvider, aspectRatio: ImageGenParams["aspect_ratio"]): void {
 	if (!aspectRatio || provider === "xai" || COMMON_IMAGE_ASPECT_RATIO_SET.has(aspectRatio)) {
@@ -624,7 +630,7 @@ function imageProviderOrder(activeModel: Model | undefined, requested?: ImagePro
 	const providers: ImageProvider[] = [];
 	const added = new Set<ImageProvider>();
 	const add = (provider: ImageProvider | null): void => {
-		if (!provider || added.has(provider)) return;
+		if (!provider || added.has(provider) || excludedImageProviders.has(provider)) return;
 		added.add(provider);
 		providers.push(provider);
 	};

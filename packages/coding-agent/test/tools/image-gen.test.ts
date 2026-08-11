@@ -7,6 +7,7 @@ import {
 	getImageGenTools,
 	getImageGenToolsWithRegistry,
 	imageGenTool,
+	setExcludedImageProviders,
 	setImageProviderOrder,
 } from "@oh-my-pi/pi-coding-agent/tools/image-gen";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -21,6 +22,7 @@ afterEach(async () => {
 	} else {
 		Bun.env.OPENROUTER_API_KEY = originalOpenRouterKey;
 	}
+	setExcludedImageProviders([]);
 	setImageProviderOrder([]);
 });
 
@@ -743,6 +745,21 @@ describe("imageGenTool", () => {
 
 		expect(requestUrls).toEqual(["https://api.openai.com/v1/responses", "https://api.x.ai/v1/images/generations"]);
 		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("never routes through excluded image providers", async () => {
+		setExcludedImageProviders(["antigravity", "xai", "openrouter", "gemini"]);
+		let fetchCount = 0;
+		const fetchMock: typeof fetch = (async () => {
+			fetchCount += 1;
+			return new Response(null, { status: 500 });
+		}) as unknown as typeof fetch;
+		const ctx = createAntigravityXAIContext(undefined, fetchMock);
+
+		await expect(
+			imageGenTool.execute("call-excluded-providers", { subject: "a cat" }, undefined, ctx),
+		).rejects.toThrow("No image API credentials found");
+		expect(fetchCount).toBe(0);
 	});
 
 	it("falls back to xAI after an earlier provider HTTP failure", async () => {

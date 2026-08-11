@@ -68,6 +68,7 @@ import {
 } from "../../thinking";
 import {
 	isSearchProviderId,
+	setExcludedImageProviders,
 	setExcludedSearchProviders,
 	setImageProviderOrder,
 	setSearchProviderOrder,
@@ -680,6 +681,11 @@ export class SelectorController {
 			case "providers.imageOrder":
 				if (Array.isArray(value)) {
 					setImageProviderOrder(value.filter((entry): entry is string => typeof entry === "string"));
+				}
+				break;
+			case "providers.imageExclude":
+				if (Array.isArray(value)) {
+					setExcludedImageProviders(value.filter((entry): entry is string => typeof entry === "string"));
 				}
 				break;
 

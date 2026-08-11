@@ -4983,6 +4983,17 @@ export const SETTINGS_SCHEMA = {
 			ordered: true,
 		},
 	},
+	"providers.imageExclude": {
+		type: "array",
+		default: [] as ImageProvider[],
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Excluded Image Providers",
+			description: "Providers that generate_image should never use, even as fallbacks or per-request overrides",
+			options: IMAGE_PROVIDER_CHOICES,
+		},
+	},
 	"providers.fireworksTier": {
 		type: "enum",
 		values: ["standard", "priority"] as const,

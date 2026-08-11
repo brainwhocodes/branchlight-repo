@@ -1,4 +1,13 @@
 generate_image:
   enabled: true
+providers:
+  imageOrder:
+    - openai
+    - openai-codex
+  imageExclude:
+    - antigravity
+    - xai
+    - openrouter
+    - gemini
 tools:
   xdev: false

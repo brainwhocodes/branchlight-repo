@@ -10,6 +10,7 @@
 ### Changed
 
 - Changed image-generation timeline entries to show live progress and render generated images inline.
+- Limited native image generation to OpenAI API and ChatGPT/Codex subscription providers.
 - Changed the chat composer to expose all RPC slash commands in a keyboard-accessible, scrollable fuzzy-search menu while command discovery and prompt acknowledgement stay asynchronous.
 - Changed desktop session settings to expose a searchable model catalog plus thinking, fast mode, steering, follow-up, interrupt, automatic-compaction, and automatic-retry controls with explicit loading, stopped-session, success, and failure states.
 
