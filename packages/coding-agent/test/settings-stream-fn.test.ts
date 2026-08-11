@@ -26,6 +26,7 @@ function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOpt
 const stubModel = {} as unknown as Model;
 const stubCodexModel = { api: "openai-codex-responses" } as unknown as Model;
 const stubResponsesModel = { api: "openai-responses" } as unknown as Model;
+const stubOpenRouterModel = { provider: "openrouter", id: "openai/gpt-4o" } as unknown as Model;
 const stubContext = { messages: [], tools: [], systemPrompt: [] } as unknown as Context;
 
 describe("createSettingsAwareStreamFn", () => {
@@ -49,6 +50,19 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(options?.loopGuard).toEqual({ enabled: true, checkAssistantContent: true });
 		// caller's own option is preserved
 		expect(options?.apiKey).toBe("k");
+	});
+	it("applies model-specific OpenRouter provider exclusions", () => {
+		const settings = Settings.isolated({
+			"providers.openrouterIgnoredProviders": {
+				"openai/gpt-4o": ["azure", "together"],
+			},
+		});
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(settings, base);
+
+		wrapped(stubOpenRouterModel, stubContext, undefined);
+
+		expect(calls[0]?.options?.openrouterIgnoredProviders).toEqual(["azure", "together"]);
 	});
 
 	it("keeps assistant prose loop scanning at its configured default", () => {

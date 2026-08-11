@@ -60,7 +60,7 @@ export interface SessionHandoffHost {
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	deobfuscateFromProvider(text: string): string;
 	convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]>;
-	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string): SimpleStreamOptions;
+	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string, modelId?: string): SimpleStreamOptions;
 	effectiveServiceTier(model: Model | undefined): ServiceTier | undefined;
 	flushPendingBash(): Promise<void>;
 	beginBashSessionTransition(): BashSessionTransition;
@@ -197,6 +197,7 @@ export class SessionHandoff {
 					signal: handoffSignal,
 				},
 				model.provider,
+				model.id,
 			);
 			const rawHandoffText = await generateHandoffFromContext(
 				obfuscateProviderContext(this.#host.obfuscator, handoffContext),

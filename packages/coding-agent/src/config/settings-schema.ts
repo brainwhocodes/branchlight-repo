@@ -317,6 +317,7 @@ export interface ModelTagsSettings {
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_STRING_ARRAY_RECORD: Record<string, string[]> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
@@ -5329,6 +5330,10 @@ export const SETTINGS_SCHEMA = {
 				},
 			],
 		},
+	},
+	"providers.openrouterIgnoredProviders": {
+		type: "record",
+		default: EMPTY_STRING_ARRAY_RECORD,
 	},
 	"providers.fetch": {
 		type: "enum",

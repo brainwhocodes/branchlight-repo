@@ -641,9 +641,18 @@ export function applyOpenAIGatewayRouting(
 	params: OpenAIGatewayRoutingParams,
 	compat: OpenAIGatewayRoutingCompat,
 	cacheEnabled = true,
+	ignoredProviders?: string[],
 ): void {
-	if (compat.isOpenRouterHost && compat.openRouterRouting) {
-		params.provider = compat.openRouterRouting;
+	if (compat.isOpenRouterHost && (compat.openRouterRouting || ignoredProviders?.length)) {
+		const routing = compat.openRouterRouting;
+		if (!ignoredProviders?.length) {
+			params.provider = routing;
+		} else {
+			const ignore = routing?.ignore?.length
+				? [...new Set([...routing.ignore, ...ignoredProviders])]
+				: ignoredProviders;
+			params.provider = { ...routing, ignore };
+		}
 	}
 	if (compat.isVercelGatewayHost && compat.vercelGatewayRouting) {
 		const routing = compat.vercelGatewayRouting;

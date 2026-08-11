@@ -13,6 +13,7 @@
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { isAnthropicFableOrMythosModel } from "@oh-my-pi/pi-catalog/identity";
+import { getOpenRouterIgnoredProviders } from "../config/openrouter-routing";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
 
 function timeoutSecondsToMs(value: number): number | undefined {
@@ -32,6 +33,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const openrouterRoutingPreset = settings.get("providers.openrouterVariant");
 		const openrouterVariant =
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
+		const ignoredProviders = model.provider === "openrouter" ? getOpenRouterIgnoredProviders(settings, model.id) : [];
 		const antigravityEndpointMode = settings.get("providers.antigravityEndpoint");
 		const textVerbosity =
 			model.api === "openai-codex-responses"
@@ -58,6 +60,8 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const merged: SimpleStreamOptions = {
 			...streamOptions,
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
+			openrouterIgnoredProviders:
+				streamOptions?.openrouterIgnoredProviders ?? (ignoredProviders.length > 0 ? ignoredProviders : undefined),
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,

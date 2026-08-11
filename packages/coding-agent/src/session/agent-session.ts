@@ -1528,7 +1528,8 @@ export class AgentSession {
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			deobfuscateFromProvider: text => this.#deobfuscateFromProvider(text),
 			convertMessagesToLlm: (messages, signal) => this.convertMessagesToLlm(messages, signal),
-			prepareSimpleStreamOptions: (options, provider) => this.prepareSimpleStreamOptions(options, provider),
+			prepareSimpleStreamOptions: (options, provider, modelId) =>
+				this.prepareSimpleStreamOptions(options, provider, modelId),
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
 			flushPendingBash: () => this.#bash.flushPending(),
 			beginBashSessionTransition: () => this.#bash.beginSessionTransition(),
@@ -4544,8 +4545,12 @@ export class AgentSession {
 	}
 
 	/** Apply session-level stream hooks to a direct side request. */
-	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider = "anthropic"): SimpleStreamOptions {
-		return this.#providerBoundary.prepareSimpleStreamOptions(options, provider);
+	prepareSimpleStreamOptions(
+		options: SimpleStreamOptions,
+		provider = "anthropic",
+		modelId?: string,
+	): SimpleStreamOptions {
+		return this.#providerBoundary.prepareSimpleStreamOptions(options, provider, modelId);
 	}
 
 	/** Current steering mode */
@@ -7300,6 +7305,7 @@ export class AgentSession {
 				signal: args.signal,
 			},
 			model.provider,
+			model.id,
 		);
 
 		let providerReplyText = "";

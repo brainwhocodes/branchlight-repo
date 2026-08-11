@@ -36,9 +36,11 @@ import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { getRpcFileDiff } from "./rpc-file-diff";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import { getRpcOpenRouterModelRouting, setRpcOpenRouterProviderEnabled } from "./rpc-openrouter-routing";
 import { getRpcSettings, setRpcSetting } from "./rpc-settings";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
@@ -1111,6 +1113,10 @@ export async function runRpcMode(
 				return success(id, "get_state", state);
 			}
 
+			case "get_file_diff": {
+				return success(id, "get_file_diff", await getRpcFileDiff(session.sessionManager.getCwd(), command.path));
+			}
+
 			case "set_fast_mode": {
 				const supported = session.setFastMode(command.enabled);
 				if (command.enabled && !supported) {
@@ -1231,6 +1237,26 @@ export async function runRpcMode(
 				await session.modelRegistry.awaitBackgroundRefresh();
 				const models = session.getAvailableModels();
 				return success(id, "get_available_models", { models });
+			}
+			case "get_openrouter_model_routing": {
+				return success(
+					id,
+					"get_openrouter_model_routing",
+					await getRpcOpenRouterModelRouting(session.settings, command.modelId),
+				);
+			}
+
+			case "set_openrouter_provider_enabled": {
+				return success(
+					id,
+					"set_openrouter_provider_enabled",
+					await setRpcOpenRouterProviderEnabled(
+						session.settings,
+						command.modelId,
+						command.providerId,
+						command.enabled,
+					),
+				);
 			}
 
 			// =================================================================

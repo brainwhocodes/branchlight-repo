@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added per-request OpenRouter upstream exclusions that merge with model-level `only`, `order`, and `ignore` routing preferences across Chat Completions, Responses, and native transports.
+
 
 ## [17.2.12] - 2026-08-08
 

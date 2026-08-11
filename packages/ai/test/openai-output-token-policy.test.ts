@@ -125,6 +125,22 @@ describe("applyOpenAIGatewayRouting", () => {
 		expect(params.provider).toEqual(routing);
 		expect(params.providerOptions).toBeUndefined();
 	});
+	it("merges per-request OpenRouter exclusions with model routing", () => {
+		const params = routingParams();
+		applyOpenAIGatewayRouting(
+			params,
+			{
+				isOpenRouterHost: true,
+				openRouterRouting: { only: ["anthropic", "openai"], ignore: ["azure"] },
+			},
+			true,
+			["together", "azure"],
+		);
+		expect(params.provider).toEqual({
+			only: ["anthropic", "openai"],
+			ignore: ["azure", "together"],
+		});
+	});
 
 	it("does not set provider when the host is not OpenRouter", () => {
 		const params = routingParams();

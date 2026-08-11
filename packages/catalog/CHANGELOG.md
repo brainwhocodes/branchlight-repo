@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Extended OpenRouter routing metadata and model-config validation with upstream `ignore` lists.
+
 
 ## [17.2.12] - 2026-08-08
 

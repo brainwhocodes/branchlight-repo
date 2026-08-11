@@ -482,6 +482,8 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	 * with the variant baked in).
 	 */
 	openrouterVariant?: string;
+	/** Upstream provider slugs to exclude from OpenRouter routing. */
+	openrouterIgnoredProviders?: string[];
 	/** Opt-in GPT-5.6+ prompt-cache policy. Unsupported explicit mode fails locally. */
 	promptCache?: OpenAIPromptCacheOptions;
 }
@@ -1709,7 +1711,7 @@ function buildParams(
 	applyChatCompletionsCompatPolicy(params, finalPolicy);
 	dropOpenRouterKimiForcedToolReasoning(params, model, finalPolicy);
 
-	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none");
+	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none", options?.openrouterIgnoredProviders);
 
 	applyOpenAIExtraBody(params, compat.extraBody, {
 		dropThinkingWhenReasoningEffort: compat.dropThinkingWhenReasoningEffort,

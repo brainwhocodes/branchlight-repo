@@ -1650,6 +1650,7 @@ function mapOptionsForApi<TApi extends Api>(
 					serviceTier: options?.serviceTier,
 					reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 					openrouterVariant: options?.openrouterVariant,
+					openrouterIgnoredProviders: options?.openrouterIgnoredProviders,
 					maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 					disableReasoning: options?.disableReasoning,
 					textVerbosity: options?.textVerbosity,
@@ -1664,6 +1665,7 @@ function mapOptionsForApi<TApi extends Api>(
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
+				openrouterIgnoredProviders: options?.openrouterIgnoredProviders,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
 			});
@@ -1677,6 +1679,7 @@ function mapOptionsForApi<TApi extends Api>(
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
+				openrouterIgnoredProviders: options?.openrouterIgnoredProviders,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				promptCache: options?.promptCache,
 			});
@@ -1689,6 +1692,7 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				openrouterVariant: options?.openrouterVariant,
+				openrouterIgnoredProviders: options?.openrouterIgnoredProviders,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				disableReasoning: options?.disableReasoning,
 				textVerbosity: options?.textVerbosity,

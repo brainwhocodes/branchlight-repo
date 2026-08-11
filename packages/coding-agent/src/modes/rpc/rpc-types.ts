@@ -19,7 +19,9 @@ import type {
 	SubagentProgressPayload,
 } from "../../task";
 import type { TodoPhase } from "../../tools/todo";
+import type { RpcFileDiffResult } from "./rpc-file-diff";
 import type { RpcMessagesPage } from "./rpc-messages";
+import type { RpcOpenRouterModelRouting } from "./rpc-openrouter-routing";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -49,11 +51,14 @@ export type RpcCommand =
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+	| { id?: string; type: "get_file_diff"; path: string }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
+	| { id?: string; type: "get_openrouter_model_routing"; modelId: string }
+	| { id?: string; type: "set_openrouter_provider_enabled"; modelId: string; providerId: string; enabled: boolean }
 
 	// Thinking
 	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
@@ -238,6 +243,7 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "get_file_diff"; success: true; data: RpcFileDiffResult }
 	| {
 			id?: string;
 			type: "response";
@@ -312,6 +318,20 @@ export type RpcResponse =
 			command: "get_available_models";
 			success: true;
 			data: { models: Model[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_openrouter_model_routing";
+			success: true;
+			data: RpcOpenRouterModelRouting;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_openrouter_provider_enabled";
+			success: true;
+			data: RpcOpenRouterModelRouting;
 	  }
 
 	// Thinking

@@ -7,6 +7,7 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
+import { getOpenRouterIgnoredProviders } from "../config/openrouter-routing";
 import type { Settings } from "../config/settings";
 import { validateProviderMaxInFlightRequests } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -130,7 +131,11 @@ export class SessionProviderBoundary {
 	}
 
 	/** Applies session-level stream hooks and provider defaults to a side request. */
-	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider = "anthropic"): SimpleStreamOptions {
+	prepareSimpleStreamOptions(
+		options: SimpleStreamOptions,
+		provider = "anthropic",
+		modelId?: string,
+	): SimpleStreamOptions {
 		const sessionOnPayload = this.#host.onPayload;
 		const sessionOnResponse = this.#host.onResponse;
 		const sessionMetadata = this.#host.agent.metadataForProvider(provider);
@@ -141,12 +146,16 @@ export class SessionProviderBoundary {
 			openrouterRoutingPreset !== "default" && options.openrouterVariant === undefined
 				? openrouterRoutingPreset
 				: undefined;
+		const ignoredProviders =
+			provider === "openrouter" && modelId ? getOpenRouterIgnoredProviders(this.#host.settings, modelId) : [];
 		const antigravityEndpointMode =
 			provider === "google-antigravity" ? this.#host.settings.get("providers.antigravityEndpoint") : undefined;
 
 		const preparedOptions: SimpleStreamOptions = {
 			...options,
 			...(openrouterVariant !== undefined && { openrouterVariant }),
+			openrouterIgnoredProviders:
+				options.openrouterIgnoredProviders ?? (ignoredProviders.length > 0 ? ignoredProviders : undefined),
 			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				options.maxInFlightRequests ?? this.#host.settings.get("providers.maxInFlightRequests"),

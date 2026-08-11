@@ -630,6 +630,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * or the catalog entry already names the variant).
 	 */
 	openrouterVariant?: string;
+	/** Upstream provider slugs to exclude from OpenRouter routing for this request. */
+	openrouterIgnoredProviders?: string[];
 	/**
 	 * Caller-owned Google context-cache resource name. Forwarded only to the
 	 * direct Gemini GenerateContent and Vertex GenerateContent APIs; all other

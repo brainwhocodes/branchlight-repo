@@ -107,6 +107,8 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	textVerbosity?: "low" | "medium" | "high";
 	toolChoice?: ToolChoice;
 	openrouterVariant?: string;
+	/** Upstream provider slugs to exclude from OpenRouter routing. */
+	openrouterIgnoredProviders?: string[];
 	maxTokensExplicit?: boolean;
 	disableReasoning?: boolean;
 	/**
@@ -1256,7 +1258,7 @@ export function buildParams(
 	if (model.compat.isVercelGatewayHost) {
 		applyVercelResponsesCacheControls(params, model.compat, cacheRetention);
 	} else {
-		applyOpenAIGatewayRouting(params, model.compat);
+		applyOpenAIGatewayRouting(params, model.compat, true, options?.openrouterIgnoredProviders);
 	}
 
 	applyOpenAIExtraBody(params, options?.extraBody);

@@ -551,6 +551,8 @@ export interface OpenRouterRouting {
 	only?: string[];
 	/** List of provider slugs to try in order (e.g., ["anthropic", "openai"]). */
 	order?: string[];
+	/** List of provider slugs to exclude from routing (e.g., ["azure", "together"]). */
+	ignore?: string[];
 }
 
 /**

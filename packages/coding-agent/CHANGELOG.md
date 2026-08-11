@@ -6,6 +6,8 @@
 - Added the opt-in `privileged_exec` plugin tool with process-local sudo credential sharing and masked UI prompts that never enter session transcripts.
 - Added credential-free RPC settings discovery and mutation commands so external hosts can render validated OMP preferences without exposing secrets.
 - Added provider exclusions for native image generation so hosts can prevent unsupported providers from being selected as fallbacks or per-request overrides.
+- Added bounded working-tree file diffs and lazy OpenRouter upstream discovery to the RPC protocol for desktop and other external hosts.
+- Added persisted per-model OpenRouter provider exclusions, applied consistently to primary, advisor, handoff, and side-channel requests.
 
 ### Changed
 
