@@ -785,7 +785,13 @@ export async function runRpcMode(
 				this.output,
 				dialogOptions,
 				undefined,
-				{ method: "input", title, placeholder, timeout: dialogOptions?.timeout },
+				{
+					method: "input",
+					title,
+					placeholder,
+					sensitive: dialogOptions?.sensitive,
+					timeout: dialogOptions?.timeout,
+				},
 				response => parseValueDialogResponse(response, dialogOptions),
 			);
 		}
@@ -1428,7 +1434,12 @@ export async function runRpcMode(
 									),
 								);
 							}
-							return (await uiCtx.input(prompt.message, prompt.placeholder, { timeout: 600_000 })) ?? "";
+							return (
+								(await uiCtx.input(prompt.message, prompt.placeholder, {
+									timeout: 600_000,
+									sensitive: true,
+								})) ?? ""
+							);
 						},
 					});
 					// Provider-scoped online refresh so the just-persisted credential
@@ -1438,6 +1449,17 @@ export async function runRpcMode(
 					return success(id, "login", { providerId: command.providerId });
 				} catch (err: unknown) {
 					return error(id, "login", err instanceof Error ? err.message : String(err));
+				}
+			}
+			case "logout": {
+				const knownProvider = getOAuthProviders().find(provider => provider.id === command.providerId);
+				if (!knownProvider) return error(id, "logout", `Unknown OAuth provider: ${command.providerId}`);
+				try {
+					await session.modelRegistry.authStorage.logout(command.providerId);
+					await session.modelRegistry.refreshProvider(command.providerId, "online");
+					return success(id, "logout", { providerId: command.providerId });
+				} catch (err: unknown) {
+					return error(id, "logout", err instanceof Error ? err.message : String(err));
 				}
 			}
 

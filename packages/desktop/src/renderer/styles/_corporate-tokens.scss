@@ -1,0 +1,40 @@
+// Source: daisyUI corporate theme, MIT licensed, pinned at 6c8b266e01ad0edfd59c38cd6675705ac59149ea.
+// https://github.com/saadeghi/daisyui/blob/6c8b266e01ad0edfd59c38cd6675705ac59149ea/packages/daisyui/src/themes/corporate.css
+:root {
+  color-scheme: light;
+  --corporate-base-100: oklch(100% 0 0);
+  --corporate-base-200: oklch(93% 0 0);
+  --corporate-base-300: oklch(86% 0 0);
+  --corporate-base-content: oklch(22.389% 0.031 278.072);
+  --corporate-primary: oklch(58% 0.158 241.966);
+  --corporate-primary-content: #fff;
+  --corporate-secondary: oklch(55% 0.046 257.417);
+  --corporate-secondary-content: #fff;
+  --corporate-accent: oklch(60% 0.118 184.704);
+  --corporate-accent-content: var(--corporate-base-content);
+  --corporate-neutral: oklch(0% 0 0);
+  --corporate-neutral-content: #fff;
+  --corporate-info: oklch(60% 0.126 221.723);
+  --corporate-info-content: var(--corporate-base-content);
+  --corporate-success: oklch(62% 0.194 149.214);
+  --corporate-success-content: var(--corporate-base-content);
+  --corporate-warning: oklch(85% 0.199 91.936);
+  --corporate-warning-content: #000;
+  --corporate-error: oklch(70% 0.191 22.216);
+  --corporate-error-content: #000;
+
+  // Derived semantic foreground for small primary text on light surfaces.
+  --bl-primary-strong: oklch(54% 0.158 241.966);
+  --bl-primary: #1768a6;
+  --bl-accent: #147f76;
+  --bl-surface: var(--corporate-base-100);
+  --bl-surface-muted: #f5f8fb;
+  --bl-surface-raised: #ffffff;
+  --bl-ink: var(--corporate-base-content);
+  --bl-ink-muted: #5f6e7c;
+  --bl-line: #d7e0e8;
+  --bl-focus: #0d6eaf;
+  --bl-danger: #b53c2e;
+  --bl-radius: 4px;
+  --bl-control-height: 36px;
+}

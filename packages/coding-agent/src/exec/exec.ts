@@ -13,6 +13,10 @@ export interface ExecOptions {
 	timeout?: number;
 	/** Working directory */
 	cwd?: string;
+	/** Environment additions or removals for the child process */
+	env?: Record<string, string | undefined>;
+	/** Bytes written to the child process stdin */
+	input?: string | Buffer | Uint8Array;
 }
 
 /**
@@ -37,6 +41,8 @@ export async function execCommand(
 ): Promise<ExecResult> {
 	const result = await ptree.exec([command, ...args], {
 		cwd,
+		env: options?.env,
+		input: options?.input,
 		signal: options?.signal,
 		timeout: options?.timeout,
 		allowNonZero: true,

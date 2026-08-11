@@ -239,7 +239,9 @@ describe("imageGenTool", () => {
 		setImageProviderOrder(["openai-codex"]);
 		let requestUrl: string | undefined;
 		let accountHeader: string | null | undefined;
+		let requestHeaders: Headers | undefined;
 		let requestBody: Record<string, unknown> | undefined;
+		let progressText: string | undefined;
 
 		// A fake Codex JWT (header.payload.signature) so getCodexAccountId can read
 		// chatgpt_account_id from the base64 payload claim.
@@ -248,26 +250,39 @@ describe("imageGenTool", () => {
 		).toString("base64");
 		const codexToken = `header.${payload}.signature`;
 
-		const sse = `data: ${JSON.stringify({
-			type: "response.completed",
-			response: {
-				output: [
-					{
-						type: "image_generation_call",
-						result: Buffer.from("codex-webp").toString("base64"),
-						revised_prompt: "A neon skyline.",
-						status: "completed",
-					},
-				],
-				usage: { input_tokens: 3, output_tokens: 4, total_tokens: 7 },
-			},
-		})}\n\n`;
+		const responseBody = [
+			"event: response.created",
+			`data: ${JSON.stringify({ type: "response.created", response: { id: "resp-codex-1" } })}`,
+			"",
+			"event: response.output_item.done",
+			`data: ${JSON.stringify({
+				type: "response.output_item.done",
+				item: {
+					type: "image_generation_call",
+					id: "image-codex-1",
+					status: "completed",
+					result: Buffer.from("codex-webp").toString("base64"),
+				},
+			})}`,
+			"",
+			"event: response.completed",
+			`data: ${JSON.stringify({
+				type: "response.completed",
+				response: { id: "resp-codex-1", usage: { input_tokens: 4, output_tokens: 1 } },
+			})}`,
+			"",
+		].join("\n");
 
 		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
 			requestUrl = input.toString();
-			accountHeader = new Headers(init?.headers).get("chatgpt-account-id");
+			const headers = new Headers(init?.headers);
+			accountHeader = headers.get("chatgpt-account-id");
+			requestHeaders = headers;
 			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+			return new Response(responseBody, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
 		}) as unknown as typeof fetch;
 
 		const codexModel = {
@@ -309,20 +324,33 @@ describe("imageGenTool", () => {
 		const result = await imageGenTool.execute(
 			"call-codex",
 			{ subject: "a neon skyline", aspect_ratio: "1:1" },
-			undefined,
+			update => {
+				progressText = update.content.find(part => part.type === "text")?.text;
+			},
 			ctx,
 		);
 		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+		expect(progressText).toBe("Generating image…");
 
 		expect(requestUrl).toBe("https://chatgpt.com/backend-api/codex/responses");
 		expect(accountHeader).toBe("acct-codex-1");
+		expect(requestHeaders?.get("accept")).toBe("text/event-stream");
+		expect(requestHeaders?.get("OpenAI-Beta")).toBe("responses=experimental");
+		expect(requestHeaders?.get("originator")).toBe("pi");
 		expect(requestBody).toMatchObject({
 			model: "gpt-5.5",
-			tools: [{ type: "image_generation", output_format: "webp", size: "1024x1024", action: "generate" }],
+			store: false,
 			stream: true,
+			prompt_cache_key: "test-session",
+			instructions:
+				"You are generating bitmap image assets. For this request, call the image_generation tool exactly once. Do not answer with only text unless image generation is unavailable.",
+			tools: [{ type: "image_generation", output_format: "webp" }],
+			tool_choice: "auto",
+			parallel_tool_calls: false,
+			text: { verbosity: "low" },
 		});
 		expect(result.details?.provider).toBe("openai-codex");
-		expect(result.details?.model).toBe("gpt-5.5");
+		expect(result.details?.model).toBe("gpt-image-2");
 		expect(result.details?.imageCount).toBe(1);
 		const savedPath = result.details?.imagePaths[0];
 		if (!savedPath) throw new Error("Expected generated image path");

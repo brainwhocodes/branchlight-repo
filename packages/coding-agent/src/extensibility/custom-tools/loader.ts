@@ -170,21 +170,49 @@ export class CustomToolLoader {
 		for (const { path: toolPath, source } of pathsWithSources) {
 			const { tools: loadedTools, errors } = await loadTool(toolPath, this.#sharedApi.cwd, this.#sharedApi, source);
 			this.errors.push(...errors);
+			this.#registerLoadedTools(loadedTools, toolPath, source);
+		}
+	}
 
-			for (const loadedTool of loadedTools) {
-				// Check for name conflicts
-				if (this.#seenNames.has(loadedTool.tool.name)) {
-					this.errors.push({
-						path: toolPath,
-						error: `Tool name "${loadedTool.tool.name}" conflicts with existing tool`,
-						source,
-					});
-					continue;
+	async loadBuiltInFactories(factories: CustomToolFactory[]): Promise<void> {
+		const source = { provider: "builtin", providerName: "OMP", level: "user" as const };
+		for (const [index, factory] of factories.entries()) {
+			const toolPath = `builtin:${index}`;
+			try {
+				const toolResult = await withHostGuard(async () => factory(this.#sharedApi));
+				const toolsArray = Array.isArray(toolResult) ? toolResult : [toolResult];
+				const loadedTools: LoadedCustomTool[] = [];
+				for (const [toolIndex, tool] of toolsArray.entries()) {
+					if (!isLoadableCustomTool(tool)) {
+						this.errors.push(invalidToolError(toolPath, toolIndex, source));
+						continue;
+					}
+					loadedTools.push({ path: toolPath, resolvedPath: toolPath, tool, source });
 				}
-
-				this.#seenNames.add(loadedTool.tool.name);
-				this.tools.push(loadedTool);
+				this.#registerLoadedTools(loadedTools, toolPath, source);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.errors.push({ path: toolPath, error: `Failed to load tool: ${message}`, source });
 			}
+		}
+	}
+
+	#registerLoadedTools(
+		loadedTools: LoadedCustomTool[],
+		toolPath: string,
+		source?: { provider: string; providerName: string; level: "user" | "project" },
+	): void {
+		for (const loadedTool of loadedTools) {
+			if (this.#seenNames.has(loadedTool.tool.name)) {
+				this.errors.push({
+					path: toolPath,
+					error: `Tool name "${loadedTool.tool.name}" conflicts with existing tool`,
+					source,
+				});
+				continue;
+			}
+			this.#seenNames.add(loadedTool.tool.name);
+			this.tools.push(loadedTool);
 		}
 	}
 
@@ -210,8 +238,10 @@ export async function loadCustomTools(
 		apply(reason: string): Promise<AgentToolResult<unknown>>;
 		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 	}) => void,
+	builtInFactories: CustomToolFactory[] = [],
 ) {
 	const loader = new CustomToolLoader(PiCodingAgent, cwd, builtInToolNames, pushPendingAction);
+	await loader.loadBuiltInFactories(builtInFactories);
 	await loader.load(pathsWithSources);
 	return {
 		tools: loader.tools,

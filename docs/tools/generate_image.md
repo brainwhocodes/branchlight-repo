@@ -9,6 +9,10 @@
 
 The custom tool is registered only when `generate_image.enabled=true` (default `false`) and the session's explicit tool filter, if any, requests `generate_image`.
 
+## Enablement and Invocation
+- Image generation is opt-in. `generate_image.enabled` is disabled by default and is the sole persistent enablement setting; normal CLI tool disabling and explicit tool whitelists still apply.
+- For an explicit image-generation or image-edit request, invoke `generate_image` directly without asking for redundant confirmation.
+
 ## Inputs
 
 | Field | Type | Required | Description |
@@ -34,16 +38,17 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 - Provider responses with no image data return `imageCount: 0`, empty `imagePaths` / `images`, and any provider text/feedback available.
 
 ## Flow
-1. The SDK injects `generate_image` as a custom tool via `getImageGenTools()` only when the feature gate and tool filter allow it.
+1. When `generate_image.enabled` is enabled, the SDK injects `generate_image` via `getImageGenTools()`.
 2. Provider order is: concrete per-request `provider`, entries in `providers.imageOrder`, the active session model's corresponding image provider, then the built-in order `openai`, `openai-codex`, `antigravity`, `xai`, `openrouter`, `gemini`; duplicates are removed. `provider: "auto"` does not add a provider.
 3. The tool skips providers without usable credentials. Credentialed provider HTTP failures are collected and the next provider is tried; validation, parsing, local I/O, cancellation, and timeout failures are not fallback conditions.
-4. Input images are resolved once, after the first usable provider is found. A `path` is resolved relative to session cwd and content-sniffed. Inline `data` may be raw base64 (requiring `mime_type`) or a `data:<mime>;base64,...` URL.
+4. Input images are resolved once, after the first usable provider is found. A `path` is resolved relative to session cwd and content-sniffed. Inline `data` may be raw base64 (requiring `mime_type`) or a `data:<mime>;base64` URL.
 5. Provider-specific aspect-ratio support is checked after provider selection.
 6. Provider dispatch:
-   - OpenAI: hosted Responses image-generation on an active compatible GPT Responses model.
-   - OpenAI Codex: hosted Responses image-generation on a compatible connected ChatGPT/Codex subscription model, even when the active chat model is from another provider.
+   - Official ChatGPT/Codex subscription auth: Codex Responses API `image_generation` tool, routed through the connected GPT model and backed by `gpt-image-2`.
+   - Custom Codex proxies and opaque Codex credentials: the same hosted Responses route with proxy-specific base URL resolution.
+   - OpenAI API keys: existing OpenAI-hosted image route.
    - Antigravity: Google Antigravity SSE endpoint.
-   - OpenRouter: image-capable chat completion endpoint.
+   - OpenRouter: OpenRouter image-capable chat completion endpoint.
    - xAI: Grok Imagine generation or edit endpoint.
    - Gemini: Gemini `generateContent` with `responseModalities: ["IMAGE"]`.
 7. Inline images in a successful provider response are saved to temporary files; paths and base64/MIME image metadata are returned. A response with no image data returns a normal zero-image result rather than `isError`.

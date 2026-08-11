@@ -1,6 +1,14 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added the opt-in `privileged_exec` plugin tool with process-local sudo credential sharing and masked UI prompts that never enter session transcripts.
+
+### Changed
+
+- Changed ChatGPT/Codex subscription image generation to use the Codex Responses API's native `image_generation` tool, routed through the connected GPT model and backed by `gpt-image-2`; custom proxies keep their hosted Responses base URL.
+- Changed image generation to emit an immediate progress update while the provider is still generating the image.
 
 ## [17.2.12] - 2026-08-08
 

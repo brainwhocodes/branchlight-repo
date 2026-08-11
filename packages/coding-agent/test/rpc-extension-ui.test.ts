@@ -37,4 +37,33 @@ describe("RPC extension UI", () => {
 		});
 		expect(pendingRequests.size).toBe(0);
 	});
+	it("marks sensitive input requests and resolves them without changing the frame", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const result = requestRpcDialog(
+			pendingRequests,
+			output,
+			{ sensitive: true },
+			undefined,
+			{ method: "input", title: "Administrator password", placeholder: "Password", sensitive: true },
+			response => ("value" in response ? response.value : undefined),
+		);
+		const request = output.mock.calls[0]?.[0];
+		if (!request || !("id" in request) || typeof request.id !== "string") {
+			throw new Error("Expected the sensitive RPC dialog request to carry an id");
+		}
+
+		pendingRequests.get(request.id)?.resolve({ type: "extension_ui_response", id: request.id, value: "secret" });
+
+		expect(await result).toBe("secret");
+		expect(output).toHaveBeenCalledWith({
+			type: "extension_ui_request",
+			id: request.id,
+			method: "input",
+			title: "Administrator password",
+			placeholder: "Password",
+			sensitive: true,
+		});
+		expect(pendingRequests.size).toBe(0);
+	});
 });

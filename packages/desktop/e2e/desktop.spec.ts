@@ -1,0 +1,202 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { _electron as electron, expect, test } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
+
+const desktopRoot = path.resolve(".");
+const mainBundle = path.join(desktopRoot, ".vite", "build", "main.js");
+const electronBinary = path.join(desktopRoot, "node_modules", "electron", "dist", "electron.exe");
+const fixture = path.join(desktopRoot, "e2e", "rpc-fixture.cjs");
+
+test("covers Work and Code session supervision", async () => {
+  const userData = await mkdtemp(path.join(os.tmpdir(), "branchlight-e2e-"));
+  const workFolder = await mkdtemp(path.join(os.tmpdir(), "branchlight-work-"));
+  const codeFolder = await mkdtemp(path.join(os.tmpdir(), "branchlight-code-"));
+  const now = new Date().toISOString();
+  const workSessionFile = path.join(workFolder, ".branchlight-fixture.jsonl");
+  const codeSessionFile = path.join(codeFolder, ".branchlight-fixture.jsonl");
+  await writeFile(workSessionFile, "fixture\n", "utf8");
+  await writeFile(codeSessionFile, "fixture\n", "utf8");
+  await writeFile(path.join(userData, "sessions-v1.json"), JSON.stringify({
+    version: 1,
+    sessions: [
+      { id: "work-session-0001", kind: "work", cwd: workFolder, ompSessionId: "fixture-session-0001", sessionFile: workSessionFile, title: "Research workspace", createdAt: now, lastOpenedAt: now },
+      { id: "code-session-0001", kind: "code", cwd: codeFolder, ompSessionId: "fixture-session-0001", sessionFile: codeSessionFile, title: "Review repository", createdAt: now, lastOpenedAt: now },
+    ],
+    activeByKind: { work: "work-session-0001", code: "code-session-0001" },
+  }, null, 2), "utf8");
+
+  const app = await electron.launch({
+    executablePath: electronBinary,
+    args: [`--user-data-dir=${userData}`, mainBundle],
+    env: { ...process.env, BRANCHLIGHT_RPC_FIXTURE: fixture, BRANCHLIGHT_NODE: "node", BRANCHLIGHT_AUTH_FILE: path.join(userData, "auth-state"), ELECTRON_ENABLE_SECURITY_WARNINGS: "1" },
+  });
+  const page = await app.firstWindow();
+  const consoleErrors: string[] = [];
+  page.on("console", message => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  page.on("pageerror", error => consoleErrors.push(error.message));
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect.poll(() => page.evaluate(() => document.styleSheets.length), { timeout: 8_000 }).toBeGreaterThan(0);
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).backgroundColor), { timeout: 8_000 }).toBe("rgb(245, 248, 251)");
+  const desktopTabs = await page.locator(".mode-tabs").boundingBox();
+  expect(desktopTabs).not.toBeNull();
+  expect(Math.abs((desktopTabs?.x ?? 0) + (desktopTabs?.width ?? 0) / 2 - 720)).toBeLessThan(4);
+  await expect(page.getByRole("button", { name: "Minimize Branchlight" })).toBeVisible();
+  await page.getByRole("button", { name: "Maximize Branchlight" }).click();
+  await expect(page.getByRole("button", { name: "Restore Branchlight" })).toBeVisible();
+  await page.getByRole("button", { name: "Restore Branchlight" }).click();
+  await page.getByRole("button", { name: "Open settings" }).click();
+  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByText("Not connected")).toBeVisible();
+  await page.getByRole("button", { name: /Sign in with ChatGPT/ }).click();
+  const authInput = page.getByRole("textbox", { name: "Authentication input" });
+  await expect(authInput).toHaveAttribute("type", "password");
+  await expect(page.locator("body")).not.toContainText("fixture-code");
+  await authInput.fill("fixture-code");
+  await page.getByRole("button", { name: "Submit" }).click();
+  await expect(page.getByText("Connected")).toBeVisible();
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByText("Not connected")).toBeVisible();
+  await page.screenshot({ path: "test-results/settings-1440.png", fullPage: true });
+  await page.getByRole("button", { name: "Back to workspace" }).click();
+
+  await expect(page.getByRole("tab", { name: /Work/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "Work", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Resume" }).click();
+  await expect(page.getByText("Fixture ready.")).toBeVisible();
+  await page.getByRole("button", { name: "Open settings" }).click();
+  const sessionModel = page.getByRole("combobox", { name: "Session model" });
+  await expect(sessionModel).toBeEnabled();
+  await sessionModel.selectOption({ label: "Fast Fixture · fixture" });
+  await expect(page.locator(".settings-global-status")).toContainText("Model changed to Fast Fixture.");
+  await page.getByRole("combobox", { name: "Settings thinking level" }).selectOption("high");
+  await expect(page.locator(".settings-global-status")).toContainText("Thinking level updated.");
+  await page.getByRole("checkbox", { name: "Fast mode" }).check();
+  await expect(page.locator(".settings-global-status")).toContainText("Fast mode enabled.");
+  await page.getByRole("combobox", { name: "Steering delivery" }).selectOption("one-at-a-time");
+  await expect(page.locator(".settings-global-status")).toContainText("Steering delivery updated.");
+  await page.getByRole("combobox", { name: "Follow-up delivery" }).selectOption("one-at-a-time");
+  await expect(page.locator(".settings-global-status")).toContainText("Follow-up delivery updated.");
+  await page.getByRole("combobox", { name: "Interrupt behavior" }).selectOption("wait");
+  await expect(page.locator(".settings-global-status")).toContainText("Interrupt behavior updated.");
+  await page.getByRole("checkbox", { name: "Automatic compaction" }).uncheck();
+  await expect(page.locator(".settings-global-status")).toContainText("Automatic compaction disabled.");
+  const refreshSettings = page.getByRole("button", { name: "Refresh" });
+  await refreshSettings.click();
+  await expect(refreshSettings).toBeEnabled();
+  await expect(sessionModel).toHaveValue("fixture\u0000fast-model");
+  await expect(page.getByRole("combobox", { name: "Settings thinking level" })).toHaveValue("high");
+  await expect(page.getByRole("checkbox", { name: "Fast mode" })).toBeChecked();
+  await expect(page.getByRole("combobox", { name: "Steering delivery" })).toHaveValue("one-at-a-time");
+  await expect(page.getByRole("combobox", { name: "Follow-up delivery" })).toHaveValue("one-at-a-time");
+  await expect(page.getByRole("combobox", { name: "Interrupt behavior" })).toHaveValue("wait");
+  await expect(page.getByRole("checkbox", { name: "Automatic compaction" })).not.toBeChecked();
+  await page.screenshot({ path: "test-results/settings-runtime-1440.png", fullPage: true });
+  await page.getByRole("button", { name: "Back to workspace" }).click();
+
+  const composer = page.getByRole("combobox", { name: "Message OMP" });
+  await composer.fill("/");
+  const commandList = page.getByRole("listbox", { name: "Slash commands" });
+  await expect(commandList).toBeVisible();
+  await expect(commandList.getByRole("option")).toHaveCount(18);
+  await page.screenshot({ path: "test-results/commands-1440.png", fullPage: true });
+  expect(await commandList.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+  await commandList.hover();
+  await page.mouse.wheel(0, 600);
+  await expect.poll(() => commandList.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  await page.mouse.move(0, 0);
+  await composer.focus();
+  const selectedCommandBeforeArrow = await composer.getAttribute("aria-activedescendant");
+  await composer.press("ArrowDown");
+  await expect.poll(() => composer.getAttribute("aria-activedescendant")).not.toBe(selectedCommandBeforeArrow);
+  await composer.press("Escape");
+  await expect(commandList).toBeHidden();
+
+  await composer.fill("/cmp");
+  await expect(page.getByRole("option", { name: /\/compact/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /\/status/ })).toHaveCount(0);
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("/compact ");
+  await expect(composer).toBeFocused();
+  await expect(commandList).toBeHidden();
+
+  await composer.fill("/sta");
+  await expect(page.getByRole("option", { name: /\/status/ })).toBeVisible();
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("/status");
+  await composer.press("Enter");
+  await expect(page.getByText("Fixture status: ready")).toBeVisible();
+
+  await composer.fill("exercise the fixture");
+  await page.getByRole("button", { name: "Send" }).click();
+  const privilegedInput = page.getByRole("textbox", { name: "Sensitive input" });
+  await expect(privilegedInput).toHaveAttribute("type", "password");
+  await expect(page.locator("body")).not.toContainText("fixture-sudo-password");
+  await privilegedInput.fill("fixture-sudo-password");
+  await page.getByRole("button", { name: "Submit" }).click();
+  await expect(page.getByText("generating image", { exact: true })).toBeVisible();
+  await expect(page.getByText("Fixture completed the requested work.")).toBeVisible();
+  const reasoningSummary = page.getByText("Reasoning · available").last();
+  await expect(reasoningSummary).toBeVisible();
+  await reasoningSummary.click();
+  await expect(page.locator(".reasoning-copy").last()).toContainText("Validating the projected result.");
+  await expect(page.getByText("Image generation")).toBeVisible();
+  await expect(page.locator('img[alt="Generated image 1"]')).toBeVisible();
+  await expect(page.getByText("result.txt")).toBeVisible();
+  await page.screenshot({ path: "test-results/work-1440.png", fullPage: true });
+  const timelineScroller = page.locator(".timeline-scroll");
+  await composer.fill("seed scroll fixture");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Scroll fixture entry 18")).toBeVisible();
+  const statusEntryCount = await page.getByText("Fixture status: ready", { exact: true }).count();
+  const scrollRange = await timelineScroller.evaluate(element => element.scrollHeight - element.clientHeight);
+  expect(scrollRange).toBeGreaterThan(100);
+  await timelineScroller.evaluate((element, top) => { element.scrollTop = top; }, Math.floor(scrollRange / 2));
+  await expect.poll(() => timelineScroller.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  const anchoredScrollTop = await timelineScroller.evaluate(element => element.scrollTop);
+  await page.evaluate(() => window.branchlight.prompt("work-session-0001", "/status"));
+  await expect(page.getByText("Fixture status: ready", { exact: true })).toHaveCount(statusEntryCount + 1);
+  const preservedScrollTop = await timelineScroller.evaluate(element => element.scrollTop);
+  expect(preservedScrollTop).toBe(anchoredScrollTop);
+  expect(preservedScrollTop).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "About Branchlight" }).click();
+  await expect(page.getByRole("dialog", { name: "Branchlight" })).toContainText("Solar Icons by 480 Design");
+  await page.getByRole("dialog", { name: "Branchlight" }).getByRole("button", { name: "Close" }).click();
+
+  await page.getByRole("tab", { name: /Code/ }).click();
+  await expect(page.getByRole("heading", { name: "Code" })).toBeVisible();
+  await page.getByRole("button", { name: "Resume" }).click();
+  await expect(page.getByText("Technical record")).toBeVisible();
+  await page.getByRole("combobox", { name: "Message OMP" }).fill("inspect the fixture");
+  await page.getByRole("button", { name: "Send" }).click();
+  const codePrivilegedInput = page.getByRole("textbox", { name: "Sensitive input" });
+  await expect(codePrivilegedInput).toHaveAttribute("type", "password");
+  await codePrivilegedInput.fill("fixture-code-sudo-password");
+  await page.getByRole("button", { name: "Submit" }).click();
+  await expect(page.getByText("Technical details").first()).toBeVisible();
+  await page.getByRole("button", { name: /Verifier/ }).click();
+  await expect(page.getByText("Fixture collaborator transcript.")).toBeVisible();
+  await page.screenshot({ path: "test-results/code-1440.png", fullPage: true });
+  await page.setViewportSize({ width: 960, height: 640 });
+  await expect(page.getByRole("combobox", { name: "Message OMP" })).toBeVisible();
+  const compactTabs = await page.locator(".mode-tabs").boundingBox();
+  expect(compactTabs).not.toBeNull();
+  expect(Math.abs((compactTabs?.x ?? 0) + (compactTabs?.width ?? 0) / 2 - 480)).toBeLessThan(4);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth && document.body.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole("button", { name: "About Branchlight" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog", { name: "Branchlight" })).toBeVisible();
+  await page.getByRole("dialog", { name: "Branchlight" }).getByRole("button", { name: "Close" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "About Branchlight" })).toBeFocused();
+  await page.screenshot({ path: "test-results/branchlight-960.png", fullPage: true });
+
+  const axe = await new AxeBuilder({ page }).setLegacyMode(true).analyze();
+  expect(axe.violations.filter(violation => violation.impact === "critical" || violation.impact === "serious")).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+  await app.close();
+});

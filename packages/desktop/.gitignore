@@ -1,0 +1,14 @@
+# Electron Forge and Vite output
+.vite/
+out/
+
+# Generated Svelte analysis
+.svelte-check/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+blob-report/
+
+# Local RPC fixture state
+.branchlight-fixture.jsonl

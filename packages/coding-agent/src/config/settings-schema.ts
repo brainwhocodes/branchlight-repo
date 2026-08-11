@@ -3892,6 +3892,17 @@ export const SETTINGS_SCHEMA = {
 				"Enable the generate_image tool (text-to-image generation and editing). Exposed as an xd:// device when tools.xdev is on.",
 		},
 	},
+	"privileged_exec.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Privileged Execution",
+			description:
+				"Enable the privileged_exec plugin tool. Commands require normal tool approval and a masked administrator password prompt.",
+		},
+	},
 
 	// Legacy boolean kept only for back-compat migration to `inspect_image.mode`
 	// (see config/settings.ts). Hidden from UI.

@@ -94,6 +94,7 @@ import {
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
+import type { HookUIContext } from "./extensibility/hooks/types";
 import {
 	loadSkills as loadSkillsInternal,
 	type Skill,
@@ -211,6 +212,7 @@ import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
+import { createPrivilegedExecTool } from "./tools/privileged-exec";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
@@ -1824,6 +1826,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		toolSession.enableMCP = enableMCP;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
 		const customTools: CustomTool[] = [];
+		let setCustomToolsUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined;
 		let startDeferredMCPDiscovery: ((liveSession: AgentSession) => void) | undefined;
 		const startupQuiet = settings.get("startup.quiet");
 		const onMCPStatus = (event: McpConnectionStatusEvent) => {
@@ -1944,8 +1947,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				options.preloadedCustomToolPaths ??
 				(await logger.time("discoverCustomToolPaths", () => discoverCustomToolPaths([], cwd)));
 			const customToolsLoadResult = await logger.time("loadCustomTools", () =>
-				loadCustomTools(customToolPaths, cwd, builtInToolNames, action => queueResolveHandler(toolSession, action)),
+				loadCustomTools(
+					customToolPaths,
+					cwd,
+					builtInToolNames,
+					action => queueResolveHandler(toolSession, action),
+					settings.get("privileged_exec.enabled") ? [createPrivilegedExecTool] : undefined,
+				),
 			);
+			setCustomToolsUIContext = (uiContext, hasUI) =>
+				customToolsLoadResult.setUIContext(uiContext as unknown as HookUIContext, hasUI);
 			for (const { path, error } of customToolsLoadResult.errors) {
 				logger.error("Custom tool load failed", { path, error });
 			}
@@ -3112,9 +3123,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model) => {
 			await extensionRunner.emitAfterProviderResponse(response, model);
 		};
-
 		const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
 			toolContextStore.setUIContext(uiContext, hasUI);
+			setCustomToolsUIContext?.(uiContext, hasUI);
 		};
 
 		const initialTools = initialToolNames

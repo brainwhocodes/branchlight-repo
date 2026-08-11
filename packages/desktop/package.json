@@ -1,0 +1,52 @@
+{
+  "name": "@branchlight/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Branchlight desktop agent workspace",
+  "author": "Branchlight Labs",
+  "license": "MIT",
+  "main": ".vite/build/main.js",
+  "scripts": {
+    "start": "electron-forge start",
+    "backend:build": "bun scripts/build-backend.ts",
+    "check": "biome check . && bun run check:types && bun run check:styles",
+    "check:types": "tsgo -p tsconfig.json --noEmit && bun scripts/check-svelte.ts --tsconfig ./tsconfig.json --tsgo",
+    "check:styles": "bun scripts/check-styles.ts",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:real": "BRANCHLIGHT_REAL_OMP=1 playwright test --config playwright.real.config.ts",
+    "test:e2e:packaged": "playwright test --config playwright.packaged.config.ts",
+    "package": "electron-forge package",
+    "test:e2e:performance": "playwright test --config playwright.performance.config.ts",
+    "make": "electron-forge make"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "catalog:",
+    "@electron-forge/cli": "catalog:",
+    "@electron-forge/maker-squirrel": "catalog:",
+    "@electron-forge/plugin-fuses": "catalog:",
+    "@electron-forge/plugin-vite": "catalog:",
+    "@electron/fuses": "catalog:",
+    "@fontsource-variable/nunito-sans": "catalog:",
+    "@fontsource-variable/sora": "catalog:",
+    "@oh-my-pi/pi-utils": "catalog:",
+    "@oh-my-pi/pi-tui": "catalog:",
+    "@solar-icons/svelte": "catalog:",
+    "@sveltejs/vite-plugin-svelte": "catalog:",
+    "@types/bun": "catalog:",
+    "bulma": "catalog:",
+    "electron": "catalog:",
+    "playwright": "catalog:",
+    "sass": "catalog:",
+    "@playwright/test": "catalog:",
+    "svelte": "catalog:",
+    "svelte-check": "catalog:",
+    "@branchlight/svelte-check": "catalog:",
+    "typescript": "npm:typescript@~6.0.0",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  },
+  "config": {
+    "forge": "forge.config.ts"
+  }
+}

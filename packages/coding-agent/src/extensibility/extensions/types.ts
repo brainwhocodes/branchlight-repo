@@ -170,6 +170,8 @@ export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): 
 export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
 	timeout?: number;
+	/** Render text input as a password and never echo the value in transcript UI. */
+	sensitive?: boolean;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;
 	/** Invoked when the UI-managed timeout countdown starts */

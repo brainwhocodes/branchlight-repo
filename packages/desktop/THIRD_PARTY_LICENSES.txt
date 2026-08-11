@@ -1,0 +1,27 @@
+Branchlight Desktop — third-party notices
+
+Branchlight is distributed under the MIT license inherited from the oh-my-pi workspace.
+
+Bulma 1.0.4
+Copyright (c) Jeremy Thomas
+MIT License: https://github.com/jgthms/bulma/blob/1.0.4/LICENSE
+
+Svelte 5.56.8
+Copyright (c) 2016–present Svelte contributors
+MIT License: https://github.com/sveltejs/svelte/blob/svelte@5.56.8/LICENSE.md
+
+Electron 43.3.0 and Electron Forge 7.11.2
+Copyright (c) Electron contributors
+MIT License: https://github.com/electron/electron/blob/v43.3.0/LICENSE
+
+Solar Icons
+Solar Icons by 480 Design, CC BY 4.0
+https://github.com/480-Design/Solar-Icon-Set
+
+Sass
+Copyright (c) 2006–present Sass maintainers
+MIT License: https://github.com/sass/dart-sass/blob/1.102.0/LICENSE
+
+Fontsource Sora and Nunito Sans variable packages
+Font software is licensed under the SIL Open Font License 1.1.
+https://scripts.sil.org/OFL

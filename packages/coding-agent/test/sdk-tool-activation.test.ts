@@ -140,6 +140,19 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+	it("loads the privileged execution plugin only when explicitly enabled", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "privileged_exec.enabled": true }),
+		});
+
+		try {
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("privileged_exec");
+		} finally {
+			await session.dispose();
+		}
+	});
 
 	it("forwards built-in and external xd:// devices to Cursor provider contexts", async () => {
 		const tempDir = makeTempDir();

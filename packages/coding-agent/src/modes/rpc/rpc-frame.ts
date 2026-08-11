@@ -1,6 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
-import { isRecord } from "@oh-my-pi/pi-utils";
-import type { RpcChunkFrame } from "./rpc-types";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+
+interface RpcChunkFrame {
+	type: "rpc_chunk";
+	chunkId: string;
+	index: number;
+	count: number;
+	byteLength: number;
+	data: string;
+}
 
 /** Maximum UTF-8 size of one newline-delimited RPC frame, including the newline. */
 export const MAX_RPC_FRAME_BYTES = 1024 * 1024;

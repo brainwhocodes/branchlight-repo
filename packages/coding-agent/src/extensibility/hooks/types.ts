@@ -57,6 +57,13 @@ export type { ExecOptions, ExecResult } from "../../exec/exec";
 // surface — no terminal-input listener, no editor component override, no
 // theme management — because hooks are invoked from inside the agent loop
 // and must not be able to seize ownership of the editor.
+export interface HookUIDialogOptions {
+	signal?: AbortSignal;
+	timeout?: number;
+	/** Render text input as a password and never echo the value in transcript UI. */
+	sensitive?: boolean;
+}
+
 export interface HookUIContext {
 	/**
 	 * Show a selector and return the user's choice.
@@ -76,7 +83,7 @@ export interface HookUIContext {
 	 * Show a text input dialog.
 	 * @returns User input, or undefined if cancelled
 	 */
-	input(title: string, placeholder?: string): Promise<string | undefined>;
+	input(title: string, placeholder?: string, dialogOptions?: HookUIDialogOptions): Promise<string | undefined>;
 
 	/**
 	 * Show a notification to the user.

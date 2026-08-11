@@ -90,7 +90,8 @@ export type RpcCommand =
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
-	| { id?: string; type: "login"; providerId: string };
+	| { id?: string; type: "login"; providerId: string }
+	| { id?: string; type: "logout"; providerId: string };
 
 // ============================================================================
 // RPC State
@@ -337,6 +338,7 @@ export type RpcResponse =
 			data: { providers: Array<{ id: string; name: string; available: boolean; authenticated: boolean }> };
 	  }
 	| { id?: string; type: "response"; command: "login"; success: true; data: { providerId: string } }
+	| { id?: string; type: "response"; command: "logout"; success: true; data: { providerId: string } }
 
 	// Error response (any command can fail); `code` is an optional machine-readable reason.
 	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };
@@ -378,6 +380,7 @@ export type RpcExtensionUIRequest =
 			method: "input";
 			title: string;
 			placeholder?: string;
+			sensitive?: boolean;
 			timeout?: number;
 	  }
 	| {

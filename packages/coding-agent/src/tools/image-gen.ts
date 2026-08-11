@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { type ApiKey, type FetchImpl, getEnvApiKey, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { normalizeCodexBaseUrl } from "@oh-my-pi/pi-ai/usage/openai-codex-base-url";
 import {
 	CODEX_BASE_URL,
 	getCodexAccountId,
@@ -39,6 +41,7 @@ const MAX_IMAGE_SIZE = 35 * 1024 * 1024;
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_IMAGE_OUTPUT_FORMAT = "webp";
 const OPENAI_IMAGE_MIME_TYPE = "image/webp";
+const CODEX_IMAGE_MODEL = "gpt-image-2";
 
 const DEFAULT_ANTIGRAVITY_ENDPOINT_PROD = "https://daily-cloudcode-pa.googleapis.com";
 const DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -181,15 +184,13 @@ interface OpenAIInputTextContent {
 
 interface OpenAIInputImageContent {
 	type: "input_image";
-	detail: "auto";
 	image_url: string;
 }
-
 type OpenAIInputContent = OpenAIInputTextContent | OpenAIInputImageContent;
 
 interface OpenAIImageGenerationTool {
 	type: "image_generation";
-	action: OpenAIImageAction;
+	action?: OpenAIImageAction;
 	output_format: typeof OPENAI_IMAGE_OUTPUT_FORMAT;
 	size?: string;
 }
@@ -199,9 +200,12 @@ interface OpenAIHostedImageRequest {
 	instructions?: string;
 	input: Array<{ role: "user"; content: OpenAIInputContent[] }>;
 	tools: OpenAIImageGenerationTool[];
-	tool_choice: { type: "image_generation" };
+	tool_choice: { type: "image_generation" } | "auto";
 	store: false;
 	stream?: boolean;
+	prompt_cache_key?: string;
+	parallel_tool_calls?: false;
+	text?: { verbosity: "low" };
 }
 
 interface OpenAIImageGenerationCall {
@@ -763,6 +767,13 @@ function isOpenAIHostedImageModel(model: Model | undefined): model is Model {
 function getOpenAIHostedImageProvider(model: Model): ImageProvider {
 	return model.api === "openai-codex-responses" || model.provider === "openai-codex" ? "openai-codex" : "openai";
 }
+function isOfficialCodexSubscriptionImageRequest(model: Model, apiKey: string): boolean {
+	if (model.api !== "openai-codex-responses" && model.provider !== "openai-codex") return false;
+	return (
+		getCodexBackendRoot(model) === normalizeCodexBaseUrl(getOpenAIBaseUrl(model)) &&
+		getCodexAccountId(apiKey) !== undefined
+	);
+}
 
 function resolveOpenAIImageSize(aspectRatio: string | undefined, imageSize: string | undefined): string | undefined {
 	if (imageSize) return imageSize;
@@ -786,10 +797,27 @@ function buildOpenAIHostedImageRequest(
 	params: ImageGenParams,
 	inputImages: InlineImageData[],
 	stream: boolean,
+	sessionId: string | undefined,
 ): OpenAIHostedImageRequest {
 	const content: OpenAIInputContent[] = [{ type: "input_text", text: promptText }];
 	for (const image of inputImages) {
-		content.push({ type: "input_image", detail: "auto", image_url: toDataUrl(image) });
+		content.push({ type: "input_image", image_url: toDataUrl(image) });
+	}
+
+	if (stream) {
+		return {
+			model: model.id,
+			store: false,
+			stream: true,
+			...(sessionId ? { prompt_cache_key: sessionId } : {}),
+			instructions:
+				"You are generating bitmap image assets. For this request, call the image_generation tool exactly once. Do not answer with only text unless image generation is unavailable.",
+			input: [{ role: "user", content }],
+			tools: [{ type: "image_generation", output_format: OPENAI_IMAGE_OUTPUT_FORMAT }],
+			tool_choice: "auto",
+			parallel_tool_calls: false,
+			text: { verbosity: "low" },
+		};
 	}
 
 	const size = resolveOpenAIImageSize(params.aspect_ratio, params.image_size);
@@ -806,13 +834,6 @@ function buildOpenAIHostedImageRequest(
 		tools: [tool],
 		tool_choice: { type: "image_generation" },
 		store: false,
-		...(stream
-			? {
-					instructions:
-						"You are an AI image generator. Generate images based on user descriptions. Focus on creating high-quality, visually appealing images that match the user's request.",
-				}
-			: {}),
-		...(stream ? { stream: true } : {}),
 	};
 }
 
@@ -872,19 +893,25 @@ function getOpenAIBaseUrl(model: Model): string {
 			: DEFAULT_OPENAI_BASE_URL;
 	return (model.baseUrl || fallback).replace(/\/+$/, "");
 }
+function getCodexBackendRoot(model: Model): string {
+	const responsesUrl = resolveCodexResponsesUrl(getOpenAIBaseUrl(model));
+	return responsesUrl.slice(0, -URL_PATHS.CODEX_RESPONSES.length);
+}
 
 function getOpenAIResponsesUrl(model: Model): string {
 	const baseUrl = getOpenAIBaseUrl(model);
 	if (model.api !== "openai-codex-responses" && model.provider !== "openai-codex") {
 		return `${baseUrl}/responses`;
 	}
-	const baseWithSlash = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-	return new URL(URL_PATHS.RESPONSES.slice(1), baseWithSlash)
-		.toString()
-		.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES);
+	return resolveCodexResponsesUrl(baseUrl);
 }
 
-function buildOpenAIImageHeaders(model: Model, apiKey: string, sessionId: string | undefined): Headers {
+function buildOpenAIImageHeaders(
+	model: Model,
+	apiKey: string,
+	sessionId: string | undefined,
+	stream: boolean,
+): Headers {
 	const headers = new Headers(model.headers ?? {});
 	headers.set("Content-Type", "application/json");
 	headers.set("Authorization", `Bearer ${apiKey}`);
@@ -898,6 +925,7 @@ function buildOpenAIImageHeaders(model: Model, apiKey: string, sessionId: string
 		headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 		headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 		headers.set("User-Agent", `pi/${packageJson.version} (${os.platform()} ${os.release()}; ${os.arch()})`);
+		if (stream) headers.set("Accept", "text/event-stream");
 		if (sessionId) {
 			headers.set(OPENAI_HEADERS.CONVERSATION_ID, sessionId);
 			headers.set(OPENAI_HEADERS.SESSION_ID, sessionId);
@@ -950,10 +978,10 @@ async function generateOpenAIHostedImage(
 ): Promise<OpenAIHostedImageResult> {
 	const promptText = assemblePrompt(params);
 	const stream = model.api === "openai-codex-responses" || model.provider === "openai-codex";
-	const requestBody = buildOpenAIHostedImageRequest(model, promptText, params, inputImages, stream);
+	const requestBody = buildOpenAIHostedImageRequest(model, promptText, params, inputImages, stream, sessionId);
 	const response = await fetchImpl(getOpenAIResponsesUrl(model), {
 		method: "POST",
-		headers: buildOpenAIImageHeaders(model, apiKey, sessionId),
+		headers: buildOpenAIImageHeaders(model, apiKey, sessionId, stream),
 		body: JSON.stringify(requestBody),
 		signal,
 	});
@@ -975,7 +1003,6 @@ async function generateOpenAIHostedImage(
 	const data = (await response.json()) as OpenAIHostedImageResponse;
 	return collectOpenAIHostedImageResult(data);
 }
-
 function combineParts(response: GeminiGenerateContentResponse): GeminiPart[] {
 	const parts: GeminiPart[] = [];
 	for (const candidate of response.candidates ?? []) {
@@ -1093,12 +1120,12 @@ async function parseAntigravitySseForImage(response: Response, signal?: AbortSig
 
 export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails> = {
 	name: "generate_image",
-	label: "GenerateImage",
+	label: "Image generation",
 	strict: false,
 	approval: "write",
 	description: prompt.render(imageGenDescription),
 	parameters: imageGenSchema,
-	async execute(_toolCallId, params, _onUpdate, ctx, signal) {
+	async execute(_toolCallId, params, onUpdate, ctx, signal) {
 		return untilAborted(signal, async () => {
 			const sessionId = ctx.sessionManager.getSessionId();
 			const providerOrder = imageProviderOrder(ctx.model, params.provider);
@@ -1145,6 +1172,16 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						unsupportedAspectRatioProvider ??= provider;
 						continue;
 					}
+					onUpdate?.({
+						content: [{ type: "text", text: "Generating image…" }],
+						details: {
+							provider,
+							model: resolvedModel,
+							imageCount: 0,
+							imagePaths: [],
+							images: [],
+						},
+					});
 					if (provider === "openai" || provider === "openai-codex") {
 						if (!apiKey.model) {
 							throw new Error("Missing active GPT model for OpenAI image generation");
@@ -1153,10 +1190,11 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						const hostedModel = apiKey.model;
 						const hostedKey: ApiKey = ctx.modelRegistry.resolver(hostedModel, sessionId);
 
-						const parsed = await withAuth(
+						const { parsed, resultModel } = await withAuth(
 							hostedKey,
-							key =>
-								generateOpenAIHostedImage(
+							async key => {
+								const useCodexSubscription = isOfficialCodexSubscriptionImageRequest(hostedModel, key);
+								const parsed = await generateOpenAIHostedImage(
 									key,
 									hostedModel,
 									params,
@@ -1164,7 +1202,12 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 									fetchImpl,
 									requestSignal,
 									sessionId,
-								),
+								);
+								return {
+									parsed,
+									resultModel: useCodexSubscription ? CODEX_IMAGE_MODEL : model,
+								};
+							},
 							{ signal: requestSignal },
 						);
 
@@ -1174,7 +1217,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								content: [{ type: "text", text: `No image data returned.${messageText}` }],
 								details: {
 									provider,
-									model,
+									model: resultModel,
 									imageCount: 0,
 									imagePaths: [],
 									images: [],
@@ -1189,11 +1232,14 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 						return {
 							content: [
-								{ type: "text", text: buildResponseSummary(provider, model, imagePaths, parsed.responseText) },
+								{
+									type: "text",
+									text: buildResponseSummary(provider, resultModel, imagePaths, parsed.responseText),
+								},
 							],
 							details: {
 								provider,
-								model,
+								model: resultModel,
 								imageCount: parsed.images.length,
 								imagePaths,
 								images: parsed.images,
