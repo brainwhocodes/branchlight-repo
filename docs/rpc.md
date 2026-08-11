@@ -133,6 +133,19 @@ Important edge behavior from runtime:
 - `{ id?, type: "get_subagents" }`
 - `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
 
+### Settings
+
+- `{ id?, type: "get_settings" }`
+- `{ id?, type: "set_setting", path: string, value: boolean | string | number }`
+
+`get_settings` returns the curated, credential-free scalar settings that can be
+rendered by non-terminal hosts. Each entry includes its schema path, tab, group,
+label, description, control type, current value, finite options when applicable,
+and whether the change applies immediately or with the next session.
+`set_setting` accepts only a path from that curated surface and validates the
+value against the schema before persisting it. Credential paths are never
+exposed through either command.
+
 ### Model
 
 - `{ id?, type: "set_model", provider: string, modelId: string }`
@@ -196,6 +209,7 @@ The bundled TypeScript `RpcClient.getMessages()` and Python `RpcClient.get_messa
 
 - `{ id?, type: "get_login_providers" }`
 - `{ id?, type: "login", providerId: string }`
+- `{ id?, type: "logout", providerId: string }`
 
 ## Response Schema
 
@@ -261,6 +275,7 @@ is re-armed.
   "tokensPerSecond": null,
   "fastModeActive": false,
   "autoCompactionEnabled": true,
+  "autoRetryEnabled": true,
   "messageCount": 0,
   "queuedMessageCount": 0,
   "todoPhases": [
@@ -857,7 +872,7 @@ Current helper characteristics:
 - Correlates responses by generated `req_<n>` ids
 - Dispatches recognized core `AgentEvent` types to listeners
 - Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
-- Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)`; use raw protocol frames for any surface not wrapped by the helper.
+- Wraps common protocol commands including settings `getSettings()` / `setSetting(...)` and OAuth `getLoginProviders()` / `login(...)` / `logout(...)`; use raw protocol frames for any surface not wrapped by the helper.
 
 ### Python package
 

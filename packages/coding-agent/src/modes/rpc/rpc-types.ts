@@ -40,6 +40,8 @@ export type RpcCommand =
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
+	| { id?: string; type: "get_settings" }
+	| { id?: string; type: "set_setting"; path: string; value: RpcSettingValue }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
@@ -97,6 +99,27 @@ export type RpcCommand =
 // RPC State
 // ============================================================================
 
+export type RpcSettingValue = boolean | string | number;
+export type RpcSettingTab = "appearance" | "model" | "interaction" | "context" | "tools" | "tasks";
+
+export interface RpcSettingOption {
+	value: RpcSettingValue;
+	label: string;
+	description?: string;
+}
+
+export interface RpcSettingView {
+	path: string;
+	tab: RpcSettingTab;
+	group?: string;
+	label: string;
+	description: string;
+	control: "toggle" | "select";
+	value: RpcSettingValue;
+	options?: RpcSettingOption[];
+	apply: "immediate" | "next-session";
+}
+
 export interface RpcSessionState {
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
@@ -109,6 +132,7 @@ export interface RpcSessionState {
 	sessionId: string;
 	sessionName?: string;
 	autoCompactionEnabled: boolean;
+	autoRetryEnabled: boolean;
 	fastModeEnabled: boolean;
 	fastModeActive: boolean;
 	tokensPerSecond: number | null;
@@ -227,6 +251,20 @@ export type RpcResponse =
 			command: "get_available_commands";
 			success: true;
 			data: { commands: RpcAvailableSlashCommand[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_settings";
+			success: true;
+			data: { settings: RpcSettingView[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_setting";
+			success: true;
+			data: { setting: RpcSettingView };
 	  }
 	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoPhases: TodoPhase[] } }
 	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }

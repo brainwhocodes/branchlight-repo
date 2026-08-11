@@ -148,6 +148,14 @@ function registerIpc(desktopHost: DesktopHost): void {
 		assertTrustedSender(event);
 		return desktopHost.respondAuthPrompt(value);
 	});
+	ipcMain.handle("branchlight:agent-settings", (event, id: unknown) => {
+		assertTrustedSender(event);
+		return desktopHost.getAgentSettings(id);
+	});
+	ipcMain.handle("branchlight:set-agent-setting", (event, id: unknown, path: unknown, value: unknown) => {
+		assertTrustedSender(event);
+		return desktopHost.setAgentSetting(id, path, value);
+	});
 	ipcMain.handle("branchlight:choose-and-create", (event, kind: unknown) => {
 		assertTrustedSender(event);
 		return desktopHost.chooseAndCreate(kind);
@@ -223,6 +231,10 @@ function registerIpc(desktopHost: DesktopHost): void {
 	ipcMain.handle("branchlight:set-auto-compaction", (event, id: unknown, enabled: unknown) => {
 		assertTrustedSender(event);
 		return desktopHost.setAutoCompaction(id, enabled);
+	});
+	ipcMain.handle("branchlight:set-auto-retry", (event, id: unknown, enabled: unknown) => {
+		assertTrustedSender(event);
+		return desktopHost.setAutoRetry(id, enabled);
 	});
 	ipcMain.handle("branchlight:extension-response", (event, id: unknown, response: unknown) => {
 		assertTrustedSender(event);

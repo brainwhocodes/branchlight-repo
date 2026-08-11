@@ -38,6 +38,108 @@ const availableCommands = [
 const modelOptions = [
   { provider: "fixture", id: "fixture-model", name: "Fixture Model", reasoning: true, contextWindow: 4096 },
   { provider: "fixture", id: "fast-model", name: "Fast Fixture", reasoning: true, contextWindow: 8192 },
+  { provider: "alternate", id: "compact-model", name: "Compact Fixture", reasoning: false, contextWindow: 2048 },
+];
+let agentSettings = [
+  {
+    path: "personality",
+    tab: "model",
+    group: "Prompt behavior",
+    label: "Personality",
+    description: "Communication style rendered into the system prompt.",
+    control: "select",
+    value: "default",
+    options: [
+      { value: "default", label: "Default" },
+      { value: "friendly", label: "Friendly" },
+      { value: "pragmatic", label: "Pragmatic" },
+      { value: "none", label: "None" },
+    ],
+    apply: "immediate",
+  },
+  {
+    path: "images.autoResize",
+    tab: "appearance",
+    group: "Images",
+    label: "Resize large images",
+    description: "Resize oversized image inputs before sending them to the model.",
+    control: "toggle",
+    value: true,
+    apply: "immediate",
+  },
+  {
+    path: "tools.approvalMode",
+    tab: "interaction",
+    group: "Approvals",
+    label: "Tool approval mode",
+    description: "Choose which tool operations require confirmation.",
+    control: "select",
+    value: "yolo",
+    options: [
+      { value: "always-ask", label: "Always ask" },
+      { value: "write", label: "Ask for writes" },
+      { value: "yolo", label: "Auto-approve" },
+    ],
+    apply: "immediate",
+  },
+  {
+    path: "compaction.strategy",
+    tab: "context",
+    group: "Compaction",
+    label: "Compaction strategy",
+    description: "How OMP reduces long context windows.",
+    control: "select",
+    value: "snapcompact",
+    options: [
+      { value: "context-full", label: "Context full" },
+      { value: "handoff", label: "Handoff" },
+      { value: "shake", label: "Shake" },
+      { value: "snapcompact", label: "Snapcompact" },
+      { value: "off", label: "Off" },
+    ],
+    apply: "immediate",
+  },
+  {
+    path: "generate_image.enabled",
+    tab: "tools",
+    group: "Native media",
+    label: "Generate image",
+    description: "Expose the native image generation tool to the agent.",
+    control: "toggle",
+    value: true,
+    apply: "next-session",
+  },
+  {
+    path: "inspect_image.mode",
+    tab: "tools",
+    group: "Native media",
+    label: "Inspect image",
+    description: "Control when the delegated image inspection tool is exposed.",
+    control: "select",
+    value: "auto",
+    options: [
+      { value: "auto", label: "Auto" },
+      { value: "on", label: "On" },
+      { value: "off", label: "Off" },
+    ],
+    apply: "immediate",
+  },
+  {
+    path: "task.maxConcurrency",
+    tab: "tasks",
+    group: "Delegation",
+    label: "Maximum collaborators",
+    description: "Maximum number of subagents that can run concurrently.",
+    control: "select",
+    value: 32,
+    options: [
+      { value: 4, label: "4" },
+      { value: 8, label: "8" },
+      { value: 16, label: "16" },
+      { value: 32, label: "32" },
+    ],
+    apply: "immediate",
+  },
 ];
 const historyMessages = performanceMessages ?? [{ id: "fixture-welcome", role: "assistant", content: [{ type: "text", text: "Fixture ready. Choose a Work or Code action." }] }];
 const args = process.argv.slice(2);
@@ -57,6 +159,7 @@ let steeringMode = "all";
 let followUpMode = "all";
 let interruptMode = "immediate";
 let autoCompactionEnabled = true;
+let autoRetryEnabled = true;
 
 fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
 if (!fs.existsSync(sessionFile)) fs.writeFileSync(sessionFile, "fixture\n", "utf8");
@@ -122,6 +225,7 @@ input.on("line", line => {
     followUpMode,
     interruptMode,
     autoCompactionEnabled,
+    autoRetryEnabled,
     fastModeEnabled,
     fastModeActive: fastModeEnabled,
     contextUsage: { tokens: 128, contextWindow: model.contextWindow },
@@ -132,7 +236,20 @@ input.on("line", line => {
   });
   if (command.type === "get_available_commands") return response({ commands: availableCommands });
   if (command.type === "get_available_models") return response({ models: modelOptions });
-  if (command.type === "get_login_providers") return response({ providers: [{ id: "openai-codex", name: "ChatGPT Plus/Pro", available: true, authenticated }] });
+  if (command.type === "get_login_providers") return response({
+    providers: [
+      { id: "openai-codex", name: "ChatGPT Plus/Pro", available: true, authenticated },
+      { id: "google-gemini-cli", name: "Google Gemini CLI", available: true, authenticated: false },
+      { id: "github-copilot", name: "GitHub Copilot", available: false, authenticated: false },
+    ],
+  });
+  if (command.type === "get_settings") return response({ settings: agentSettings });
+  if (command.type === "set_setting") {
+    const index = agentSettings.findIndex(setting => setting.path === command.path);
+    if (index < 0) return response(undefined, false);
+    agentSettings = agentSettings.map((setting, settingIndex) => settingIndex === index ? { ...setting, value: command.value } : setting);
+    return response({ setting: agentSettings[index] });
+  }
   if (command.type === "login" && command.providerId === "openai-codex") {
     const promptId = `fixture-auth-${Date.now()}`;
     pendingAuth = { command, promptId };
@@ -202,6 +319,10 @@ input.on("line", line => {
   }
   if (command.type === "set_auto_compaction") {
     autoCompactionEnabled = command.enabled;
+    return response();
+  }
+  if (command.type === "set_auto_retry") {
+    autoRetryEnabled = command.enabled;
     return response();
   }
   if (command.type === "set_session_name" || command.type === "steer" || command.type === "follow_up" || command.type === "abort") return response({ accepted: true });

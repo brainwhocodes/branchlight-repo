@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+	AgentSettingValue,
+	AgentSettingView,
 	AuthAccountView,
 	AuthEvent,
 	BootstrapSnapshot,
@@ -44,8 +46,18 @@ function extensionResponse(value: unknown): unknown {
 	if (response.value !== undefined) text(response.value, "extension response");
 	return value;
 }
-const authProvider = (value: unknown): "openai-codex" => {
-	if (value !== "openai-codex") throw new TypeError("unsupported auth provider");
+const authProvider = (value: unknown): string => {
+	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9._-]{0,159}$/i.test(value))
+		throw new TypeError("unsupported auth provider");
+	return value;
+};
+const agentSettingValue = (value: unknown): AgentSettingValue => {
+	if (
+		typeof value !== "boolean" &&
+		typeof value !== "string" &&
+		!(typeof value === "number" && Number.isFinite(value))
+	)
+		throw new TypeError("invalid agent setting value");
 	return value;
 };
 const thinkingLevel = (value: unknown): ThinkingLevel => {
@@ -79,6 +91,17 @@ const api: BranchlightApi = {
 		ipcRenderer.invoke("branchlight:auth-logout", authProvider(provider)) as Promise<AuthAccountView[]>,
 	respondAuthPrompt: value =>
 		ipcRenderer.invoke("branchlight:auth-prompt", text(value, "auth prompt")) as Promise<void>,
+	getAgentSettings: id =>
+		ipcRenderer.invoke("branchlight:agent-settings", id === undefined ? undefined : sessionId(id)) as Promise<
+			AgentSettingView[]
+		>,
+	setAgentSetting: (id, path, value) =>
+		ipcRenderer.invoke(
+			"branchlight:set-agent-setting",
+			id === undefined ? undefined : sessionId(id),
+			text(path, "setting path"),
+			agentSettingValue(value),
+		) as Promise<AgentSettingView>,
 	bootstrap: () => ipcRenderer.invoke("branchlight:bootstrap") as Promise<BootstrapSnapshot>,
 	chooseAndCreate: kind =>
 		ipcRenderer.invoke("branchlight:choose-and-create", kind) as Promise<SessionSnapshot | null>,
@@ -130,6 +153,10 @@ const api: BranchlightApi = {
 	setAutoCompaction: (id, enabled) => {
 		if (typeof enabled !== "boolean") throw new TypeError("auto-compaction must be boolean");
 		return ipcRenderer.invoke("branchlight:set-auto-compaction", sessionId(id), enabled) as Promise<void>;
+	},
+	setAutoRetry: (id, enabled) => {
+		if (typeof enabled !== "boolean") throw new TypeError("auto-retry must be boolean");
+		return ipcRenderer.invoke("branchlight:set-auto-retry", sessionId(id), enabled) as Promise<void>;
 	},
 	extensionResponse: (id, response) =>
 		ipcRenderer.invoke("branchlight:extension-response", sessionId(id), extensionResponse(response)) as Promise<void>,

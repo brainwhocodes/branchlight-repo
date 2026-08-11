@@ -482,6 +482,38 @@ describe("system prompt tool inventory", () => {
 		if (!nativeTools) expect(inventory).toContain(DIRECT_WEB_SEARCH.description);
 	});
 
+	it("injects native image routing guidance only while generate_image is active", async () => {
+		const tools = new Map(TOOLS);
+		tools.set("generate_image", {
+			label: "Generate image",
+			description: "Generates provider-backed raster images.",
+			parameters: { type: "object", properties: { subject: { type: "string" } } },
+			wireName: "provider_generate_image",
+		});
+		const renderFor = async (toolNames: string[]) => {
+			const { systemPrompt } = await buildSystemPrompt({
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames,
+				tools,
+				workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+				nativeTools: true,
+				inlineToolDescriptors: false,
+			});
+			return systemPrompt.join("\n\n");
+		};
+
+		const enabled = await renderFor(["read", "generate_image"]);
+		expect(enabled).toContain("# Native Image Generation");
+		expect(enabled).toContain("MUST call `provider_generate_image` directly");
+		expect(enabled).toContain("NEVER substitute `write`");
+
+		const disabled = await renderFor(["read"]);
+		expect(disabled).not.toContain("# Native Image Generation");
+	});
+
 	it("uses a conservative fallback inventory when no tools map is provided", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,

@@ -9,7 +9,7 @@
   export let onReasoning: (item: TimelineItem) => void;
 
   function toolLabel(value: TimelineItem): string {
-    return value.toolName === "generate_image" ? "Image generation" : value.toolName ?? value.text;
+    return value.toolName === "generate_image" ? "Generate image" : value.toolName ?? value.text;
   }
 
   function toolStatus(value: TimelineItem): string {

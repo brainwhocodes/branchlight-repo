@@ -39,6 +39,7 @@ import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import { getRpcSettings, setRpcSetting } from "./rpc-settings";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -1091,6 +1092,7 @@ export async function runRpcMode(
 					sessionId: session.sessionId,
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
+					autoRetryEnabled: session.autoRetryEnabled,
 					queuedMessageCount: session.queuedMessageCount,
 					todoPhases: session.getTodoPhases(),
 					fastModeEnabled: session.isFastModeEnabled(),
@@ -1118,6 +1120,15 @@ export async function runRpcMode(
 					enabled: session.isFastModeEnabled(),
 					active: session.isFastModeActive(),
 				});
+			}
+
+			case "get_settings": {
+				return success(id, "get_settings", { settings: getRpcSettings(session.settings) });
+			}
+
+			case "set_setting": {
+				const setting = await setRpcSetting(session, command.path, command.value);
+				return success(id, "set_setting", { setting });
 			}
 
 			case "get_available_commands": {

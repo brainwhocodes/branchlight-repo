@@ -19,6 +19,7 @@ import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
+import imageGenerationPrompt from "./prompts/system/image-generation.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
@@ -898,6 +899,15 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
 	const systemPrompt = [rendered];
+	if (toolNames.includes("generate_image")) {
+		systemPrompt.push(
+			prompt
+				.render(imageGenerationPrompt, {
+					toolName: toolPromptNames.get("generate_image") ?? "generate_image",
+				})
+				.trim(),
+		);
+	}
 	if (toolNames.includes("computer")) {
 		systemPrompt.push(computerSafetyPrompt.trim());
 	}

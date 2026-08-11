@@ -4,6 +4,7 @@
 ### Added
 
 - Added the opt-in `privileged_exec` plugin tool with process-local sudo credential sharing and masked UI prompts that never enter session transcripts.
+- Added credential-free RPC settings discovery and mutation commands so external hosts can render validated OMP preferences without exposing secrets.
 
 ### Changed
 
@@ -12,7 +13,7 @@
 
 ### Fixed
 
-- Fixed explicit image-generation requests choosing programmatic SVG or browser screenshot fallbacks instead of the native image generator.
+- Fixed explicit image-generation requests, including requests in resumed conversations, choosing programmatic SVG or browser screenshot fallbacks instead of the native image generator.
 
 ## [17.2.12] - 2026-08-08
 

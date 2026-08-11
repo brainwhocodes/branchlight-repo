@@ -1120,7 +1120,7 @@ async function parseAntigravitySseForImage(response: Response, signal?: AbortSig
 
 export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails> = {
 	name: "generate_image",
-	label: "Image generation",
+	label: "Generate image",
 	strict: false,
 	loadMode: "essential",
 	approval: "write",

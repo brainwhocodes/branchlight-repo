@@ -1,2 +1,4 @@
 generate_image:
   enabled: true
+tools:
+  xdev: false

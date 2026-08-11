@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { type BrowserWindow, dialog, shell } from "electron";
 import type {
+	AgentSettingOption,
+	AgentSettingValue,
+	AgentSettingView,
 	AuthAccountView,
 	AuthEvent,
 	BootstrapSnapshot,
@@ -47,6 +50,7 @@ type RuntimeSession = {
 	followUpMode?: QueueMode;
 	interruptMode?: InterruptMode;
 	autoCompactionEnabled?: boolean;
+	autoRetryEnabled?: boolean;
 	contextTokens?: number;
 	contextWindow?: number;
 	tokensPerSecond?: number | null;
@@ -67,6 +71,7 @@ interface StateData {
 	followUpMode: QueueMode;
 	interruptMode: InterruptMode;
 	autoCompactionEnabled: boolean;
+	autoRetryEnabled: boolean;
 	contextUsage?: { tokens: number; contextWindow: number };
 	tokensPerSecond: number | null;
 	queuedMessageCount: number;
@@ -105,6 +110,7 @@ export class DesktopHost {
 	#authClient: Promise<RpcClient> | undefined;
 	#authClientUsers = 0;
 	#authLogin: Promise<AuthAccountView[]> | undefined;
+	#activeAuthProvider: { id: string; name: string } | undefined;
 	#authPrompt:
 		| {
 				id: string;
@@ -145,9 +151,11 @@ export class DesktopHost {
 
 	async logoutProvider(providerInput: unknown): Promise<AuthAccountView[]> {
 		const provider = assertAuthProvider(providerInput);
+		const account = (await this.#authAccounts()).find(candidate => candidate.provider === provider);
+		if (!account) throw new Error(`Unsupported OAuth provider: ${provider}`);
 		const response = await this.#withAuthClient(client => client.request({ type: "logout", providerId: provider }));
 		if (!response.success) throw new Error(response.error ?? "Sign-out failed");
-		this.#emitAuth({ type: "complete", provider, message: "Signed out of ChatGPT" });
+		this.#emitAuth({ type: "complete", provider, message: `Signed out of ${account.name}.` });
 		return this.#authAccounts();
 	}
 
@@ -157,6 +165,27 @@ export class DesktopHost {
 		if (!pending) throw new Error("No authentication prompt is pending");
 		this.#authPrompt = undefined;
 		pending.process.client?.sendExtensionResponse({ type: "extension_ui_response", id: pending.id, value });
+	}
+
+	async getAgentSettings(idInput?: unknown): Promise<AgentSettingView[]> {
+		const response = await this.#withSettingsClient(idInput, client => client.request({ type: "get_settings" }));
+		if (!response.success) throw new Error(response.error ?? "Agent settings are unavailable");
+		const data = isRecord(response.data) ? response.data : undefined;
+		return normalizeAgentSettings(data?.settings);
+	}
+
+	async setAgentSetting(idInput: unknown, pathInput: unknown, valueInput: unknown): Promise<AgentSettingView> {
+		const path = assertBoundedText(pathInput, "setting path").trim();
+		if (!path || path.length > 160) throw new TypeError("invalid setting path");
+		const value = assertAgentSettingValue(valueInput);
+		const response = await this.#withSettingsClient(idInput, client =>
+			client.request({ type: "set_setting", path, value }),
+		);
+		if (!response.success) throw new Error(response.error ?? "Agent setting update failed");
+		const data = isRecord(response.data) ? response.data : undefined;
+		const setting = normalizeAgentSetting(data?.setting);
+		if (!setting) throw new Error("Agent setting response was invalid");
+		return setting;
 	}
 
 	async chooseAndCreate(kindInput: unknown): Promise<SessionSnapshot | null> {
@@ -374,6 +403,14 @@ export class DesktopHost {
 		runtime.autoCompactionEnabled = enabled;
 	}
 
+	async setAutoRetry(id: unknown, enabled: unknown): Promise<void> {
+		const runtime = await this.#requireRunning(id);
+		if (typeof enabled !== "boolean") throw new TypeError("invalid auto-retry value");
+		const response = await runtime.process.client?.request({ type: "set_auto_retry", enabled });
+		if (response && !response.success) throw new Error(response.error);
+		runtime.autoRetryEnabled = enabled;
+	}
+
 	async extensionResponse(idInput: unknown, responseInput: unknown): Promise<void> {
 		const runtime = await this.#requireRunning(idInput);
 		if (typeof responseInput !== "object" || responseInput === null || !("id" in responseInput))
@@ -486,6 +523,7 @@ export class DesktopHost {
 		runtime.followUpMode = data.followUpMode ?? "all";
 		runtime.interruptMode = data.interruptMode ?? "immediate";
 		runtime.autoCompactionEnabled = data.autoCompactionEnabled ?? true;
+		runtime.autoRetryEnabled = data.autoRetryEnabled ?? true;
 		runtime.contextTokens = data.contextUsage?.tokens;
 		runtime.contextWindow = data.contextUsage?.contextWindow;
 		runtime.tokensPerSecond = data.tokensPerSecond;
@@ -544,6 +582,7 @@ export class DesktopHost {
 			followUpMode: runtime.followUpMode,
 			interruptMode: runtime.interruptMode,
 			autoCompactionEnabled: runtime.autoCompactionEnabled,
+			autoRetryEnabled: runtime.autoRetryEnabled,
 			contextTokens: runtime.contextTokens,
 			contextWindow: runtime.contextWindow,
 			tokensPerSecond: runtime.tokensPerSecond,
@@ -556,39 +595,50 @@ export class DesktopHost {
 		const fallback: AuthAccountView = {
 			provider: "openai-codex",
 			name: "ChatGPT Plus/Pro (Codex Subscription)",
+			available: true,
 			signedIn: false,
 		};
 		try {
 			const response = await this.#withAuthClient(client => client.request({ type: "get_login_providers" }));
 			if (!response.success) return [fallback];
-			const data = response.data as {
-				providers?: Array<{ id?: string; name?: string; authenticated?: boolean }>;
-			};
-			const provider = data.providers?.find(candidate => candidate.id === "openai-codex");
-			return [
-				{
-					provider: "openai-codex",
-					name: provider?.name ?? fallback.name,
-					signedIn: provider?.authenticated === true,
-				},
-			];
+			const data = isRecord(response.data) ? response.data : undefined;
+			return normalizeAuthAccounts(data?.providers);
 		} catch {
 			return [fallback];
 		}
 	}
 
-	async #runAuthLogin(provider: "openai-codex"): Promise<AuthAccountView[]> {
+	async #runAuthLogin(provider: string): Promise<AuthAccountView[]> {
+		let providerName = provider;
 		try {
+			const account = (await this.#authAccounts()).find(candidate => candidate.provider === provider);
+			if (!account) throw new Error(`Unsupported OAuth provider: ${provider}`);
+			if (!account.available) throw new Error(`${account.name} sign-in is unavailable on this system`);
+			providerName = account.name;
+			this.#activeAuthProvider = { id: provider, name: providerName };
 			const response = await this.#withAuthClient(client => client.request({ type: "login", providerId: provider }));
-			if (!response.success) throw new Error(response.error ?? "ChatGPT sign-in failed");
-			this.#emitAuth({ type: "complete", provider, message: "ChatGPT sign-in complete." });
+			if (!response.success) throw new Error(response.error ?? `${providerName} sign-in failed`);
+			this.#emitAuth({ type: "complete", provider, message: `${providerName} sign-in complete.` });
 			return this.#authAccounts();
 		} catch (error) {
 			this.#authPrompt = undefined;
 			const message = error instanceof Error ? error.message : String(error);
 			this.#emitAuth({ type: "error", provider, message });
 			throw error;
+		} finally {
+			if (this.#activeAuthProvider?.id === provider) this.#activeAuthProvider = undefined;
 		}
+	}
+
+	async #withSettingsClient<T>(idInput: unknown, operation: (client: RpcClient) => Promise<T>): Promise<T> {
+		if (idInput !== undefined) {
+			const record = this.#record(idInput);
+			const runtime = this.#runtimes.get(record.id);
+			if (runtime?.process.client && (runtime.state === "ready" || runtime.state === "running")) {
+				return operation(runtime.process.client);
+			}
+		}
+		return this.#withAuthClient(operation);
 	}
 
 	async #withAuthClient<T>(operation: (client: RpcClient) => Promise<T>): Promise<T> {
@@ -619,17 +669,25 @@ export class DesktopHost {
 	}
 
 	#onAuthExtension(request: RpcExtensionUIRequest): void {
+		const provider = this.#activeAuthProvider ?? {
+			id: "openai-codex",
+			name: "ChatGPT Plus/Pro (Codex Subscription)",
+		};
+		if (request.method === "notify" && request.message) {
+			this.#emitAuth({ type: "progress", provider: provider.id, message: request.message });
+			return;
+		}
 		if (request.method === "open_url" && request.url) {
 			this.#emitAuth({
 				type: "auth-url",
-				provider: "openai-codex",
-				message: "Opening ChatGPT sign-in in your browser.",
+				provider: provider.id,
+				message: `Opening ${provider.name} sign-in in your browser.`,
 				url: request.launchUrl ?? request.url,
 			});
 			void this.openExternal(request.launchUrl ?? request.url).catch(error =>
 				this.#emitAuth({
 					type: "error",
-					provider: "openai-codex",
+					provider: provider.id,
 					message: error instanceof Error ? error.message : String(error),
 				}),
 			);
@@ -639,8 +697,9 @@ export class DesktopHost {
 		this.#authPrompt = { id: request.id, process: this.#authProcess };
 		this.#emitAuth({
 			type: "prompt",
-			provider: "openai-codex",
-			message: request.title ?? "Enter the authorization code",
+			provider: provider.id,
+			message: request.title ?? `Finish signing in to ${provider.name}`,
+			placeholder: request.placeholder,
 			sensitive: true,
 		});
 	}
@@ -680,6 +739,7 @@ export class DesktopHost {
 					followUpMode: runtime.followUpMode,
 					interruptMode: runtime.interruptMode,
 					autoCompactionEnabled: runtime.autoCompactionEnabled,
+					autoRetryEnabled: runtime.autoRetryEnabled,
 				},
 			});
 			return;
@@ -958,7 +1018,125 @@ function toSubagentView(value: unknown): SubagentView {
 			: undefined,
 	};
 }
-function assertAuthProvider(value: unknown): "openai-codex" {
-	if (value !== "openai-codex") throw new TypeError("Unsupported OAuth provider");
+function normalizeAuthAccounts(value: unknown): AuthAccountView[] {
+	if (!Array.isArray(value)) return [];
+	const accounts: AuthAccountView[] = [];
+	const seen = new Set<string>();
+	for (const candidate of value.slice(0, 1_000)) {
+		if (!isRecord(candidate) || typeof candidate.id !== "string" || typeof candidate.name !== "string") continue;
+		if (
+			candidate.id.length === 0 ||
+			candidate.id.length > 160 ||
+			candidate.name.length === 0 ||
+			candidate.name.length > 512 ||
+			seen.has(candidate.id)
+		)
+			continue;
+		seen.add(candidate.id);
+		accounts.push({
+			provider: candidate.id,
+			name: candidate.name,
+			available: candidate.available === true,
+			signedIn: candidate.authenticated === true,
+		});
+	}
+	return accounts.sort(
+		(left, right) =>
+			Number(right.signedIn) - Number(left.signedIn) ||
+			Number(right.available) - Number(left.available) ||
+			left.name.localeCompare(right.name),
+	);
+}
+
+function normalizeAgentSettings(value: unknown): AgentSettingView[] {
+	if (!Array.isArray(value)) return [];
+	return value
+		.slice(0, 1_000)
+		.map(normalizeAgentSetting)
+		.filter((setting): setting is AgentSettingView => setting !== undefined);
+}
+
+function normalizeAgentSetting(value: unknown): AgentSettingView | undefined {
+	if (
+		!isRecord(value) ||
+		typeof value.path !== "string" ||
+		value.path.length === 0 ||
+		value.path.length > 160 ||
+		!isAgentSettingTab(value.tab) ||
+		typeof value.label !== "string" ||
+		value.label.length === 0 ||
+		value.label.length > 512 ||
+		typeof value.description !== "string" ||
+		value.description.length > 8_192 ||
+		(value.control !== "toggle" && value.control !== "select") ||
+		(value.apply !== "immediate" && value.apply !== "next-session") ||
+		!isAgentSettingValue(value.value)
+	)
+		return undefined;
+	if (value.control === "toggle" && typeof value.value !== "boolean") return undefined;
+	const options = Array.isArray(value.options)
+		? value.options
+				.slice(0, 1_000)
+				.map(normalizeAgentSettingOption)
+				.filter((option): option is AgentSettingOption => option !== undefined)
+		: undefined;
+	if (value.control === "select" && (!options || options.length === 0)) return undefined;
+	return {
+		path: value.path,
+		tab: value.tab,
+		group: typeof value.group === "string" && value.group.length <= 160 ? value.group : undefined,
+		label: value.label,
+		description: value.description,
+		control: value.control,
+		value: value.value,
+		options,
+		apply: value.apply,
+	};
+}
+
+function normalizeAgentSettingOption(value: unknown): AgentSettingOption | undefined {
+	if (
+		!isRecord(value) ||
+		!isAgentSettingValue(value.value) ||
+		typeof value.label !== "string" ||
+		value.label.length === 0 ||
+		value.label.length > 512
+	)
+		return undefined;
+	return {
+		value: value.value,
+		label: value.label,
+		description:
+			typeof value.description === "string" && value.description.length <= 4_096 ? value.description : undefined,
+	};
+}
+
+function isAgentSettingTab(value: unknown): value is AgentSettingView["tab"] {
+	return (
+		value === "appearance" ||
+		value === "model" ||
+		value === "interaction" ||
+		value === "context" ||
+		value === "tools" ||
+		value === "tasks"
+	);
+}
+
+function isAgentSettingValue(value: unknown): value is AgentSettingValue {
+	return (
+		typeof value === "boolean" ||
+		(typeof value === "string" && value.length <= 2_048) ||
+		(typeof value === "number" && Number.isFinite(value))
+	);
+}
+
+function assertAgentSettingValue(value: unknown): AgentSettingValue {
+	if (!isAgentSettingValue(value)) throw new TypeError("invalid agent setting value");
+	return value;
+}
+
+function assertAuthProvider(value: unknown): string {
+	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9._-]{0,159}$/i.test(value))
+		throw new TypeError("Unsupported OAuth provider");
 	return value;
 }

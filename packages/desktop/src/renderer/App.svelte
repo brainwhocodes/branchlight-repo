@@ -1,14 +1,22 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import InfoCircle from "@solar-icons/svelte/linear/info-circle";
-  import type { AuthAccountView, AuthEvent, BranchlightEvent, BootstrapSnapshot, ExtensionView, InterruptMode, ModelOption, QueueMode, SessionKind, SessionSnapshot, SlashCommand, SubagentView, ThinkingLevel, TimelineItem } from "../shared/contracts";
+  import type { AgentSettingTab, AgentSettingValue, AgentSettingView, AuthAccountView, AuthEvent, BranchlightEvent, BootstrapSnapshot, ExtensionView, InterruptMode, ModelOption, QueueMode, SessionKind, SessionSnapshot, SlashCommand, SubagentView, ThinkingLevel, TimelineItem } from "../shared/contracts";
   import { outputPath, projectTimeline, workOutputItems } from "../shared/projection";
   import BranchMark from "./components/BranchMark.svelte";
   import TimelineEntry from "./components/TimelineEntry.svelte";
   import { commandInsertion, searchSlashCommands, slashCommandQuery } from "./command-search";
   import CommandMenu from "./components/CommandMenu.svelte";
 
-  type SettingKey = "model" | "thinking" | "fast" | "steering" | "follow-up" | "interrupt" | "compaction";
+  type SettingKey = "model" | "thinking" | "fast" | "steering" | "follow-up" | "interrupt" | "compaction" | "retry";
+  const AGENT_SETTING_TABS: ReadonlyArray<{ id: AgentSettingTab; label: string }> = [
+    { id: "model", label: "Model defaults" },
+    { id: "appearance", label: "Media" },
+    { id: "interaction", label: "Safety" },
+    { id: "context", label: "Context" },
+    { id: "tools", label: "Tools" },
+    { id: "tasks", label: "Delegation" },
+  ];
   let bootstrap: BootstrapSnapshot | undefined;
   let kind: SessionKind = "work";
   let activeId = "";
@@ -42,13 +50,16 @@
   let followTimeline = true;
   let view: "workspace" | "settings" = "workspace";
   let authAccounts: AuthAccountView[] = [];
-  let authBusy = false;
+  let authBusyProvider = "";
   let authStatusMessage = "";
+  let authQuery = "";
   let authPrompt: Extract<AuthEvent, { type: "prompt" }> | undefined;
   let authPromptValue = "";
   let unsubscribeAuth: (() => void) | undefined;
   let availableCommands: SlashCommand[] = [];
   let availableModels: ModelOption[] = [];
+  let modelQuery = "";
+  let modelProviderFilter = "all";
   let commandsLoading = false;
   let commandError = "";
   let commandMenuDismissed = false;
@@ -58,6 +69,9 @@
   let settingsRefreshing = false;
   let settingsBusy = new Set<SettingKey>();
   let settingsStatusMessage = "";
+  let agentSettings: AgentSettingView[] = [];
+  let agentSettingsBusy = new Set<string>();
+  let selectedAgentSettingsTab: AgentSettingTab = "model";
 
   $: sessions = bootstrap?.registry.sessions.filter(session => session.kind === kind) ?? [];
   $: hasSessions = sessions.length > 0;
@@ -88,6 +102,17 @@
   $: commandMatches = commandQuery === null ? [] : searchSlashCommands(availableCommands, commandQuery);
   $: commandMenuVisible = commandQuery !== null && !commandMenuDismissed && canCompose;
   $: if (selectedCommandIndex >= commandMatches.length) selectedCommandIndex = Math.max(0, commandMatches.length - 1);
+  $: modelProviders = Array.from(new Set(availableModels.map(model => model.provider))).sort((left, right) => left.localeCompare(right));
+  $: filteredModels = filterModelOptions(availableModels, modelQuery, modelProviderFilter, current?.model);
+  $: visibleModels = filteredModels.slice(0, 120);
+  $: filteredAuthAccounts = filterAuthAccounts(authAccounts, authQuery);
+  $: selectedModelOption = availableModels.find(model => modelIdentifier(model) === current?.model);
+  $: signedInAccountCount = authAccounts.filter(account => account.signedIn).length;
+  $: availableAgentSettingTabs = AGENT_SETTING_TABS.filter(tab => agentSettings.some(setting => setting.tab === tab.id));
+  $: if (availableAgentSettingTabs.length > 0 && !availableAgentSettingTabs.some(tab => tab.id === selectedAgentSettingsTab)) {
+    selectedAgentSettingsTab = availableAgentSettingTabs[0].id;
+  }
+  $: agentSettingGroups = groupAgentSettings(agentSettings, selectedAgentSettingsTab);
 
   onMount(() => {
     unsubscribe = window.branchlight.onEvent(handleEvent);
@@ -243,21 +268,36 @@
   async function sendPrimary(): Promise<void> {
     const text = draft.trim();
     if (!text || !current) return;
+    const sessionId = current.record.id;
+    const optimisticId = appendOptimisticUserMessage(sessionId, text);
     draft = "";
     commandMenuDismissed = true;
     errorMessage = "";
     try {
-      if (isRunning) await window.branchlight.steer(current.record.id, text);
-      else await window.branchlight.prompt(current.record.id, text);
-    } catch (error) { draft = text; commandMenuDismissed = false; showError(error); }
+      if (isRunning) await window.branchlight.steer(sessionId, text);
+      else await window.branchlight.prompt(sessionId, text);
+    } catch (error) {
+      removeOptimisticUserMessage(sessionId, optimisticId);
+      draft = text;
+      commandMenuDismissed = false;
+      showError(error);
+    }
   }
 
   async function queueNext(): Promise<void> {
     if (!current || !draft.trim()) return;
     const text = draft.trim();
+    const sessionId = current.record.id;
+    const optimisticId = appendOptimisticUserMessage(sessionId, text);
     draft = "";
-    try { await window.branchlight.queueFollowUp(current.record.id, text); notice = "Queued for the next turn"; }
-    catch (error) { draft = text; showError(error); }
+    try {
+      await window.branchlight.queueFollowUp(sessionId, text);
+      notice = "Queued for the next turn";
+    } catch (error) {
+      removeOptimisticUserMessage(sessionId, optimisticId);
+      draft = text;
+      showError(error);
+    }
   }
 
   async function abortTurn(): Promise<void> {
@@ -286,9 +326,8 @@
     }
   }
 
-  async function changeModel(value: string): Promise<void> {
-    const model = availableModels.find(candidate => `${candidate.provider}\u0000${candidate.id}` === value);
-    if (!current || !model) return;
+  async function changeModel(model: ModelOption): Promise<void> {
+    if (!current) return;
     const sessionId = current.record.id;
     await saveSessionSetting(
       "model",
@@ -331,6 +370,17 @@
     );
   }
 
+  async function changeAutoRetry(enabled: boolean): Promise<void> {
+    if (!current) return;
+    const sessionId = current.record.id;
+    await saveSessionSetting(
+      "retry",
+      () => window.branchlight.setAutoRetry(sessionId, enabled),
+      { autoRetryEnabled: enabled },
+      enabled ? "Automatic retry enabled." : "Automatic retry disabled.",
+    );
+  }
+
   async function saveSessionSetting(
     key: SettingKey,
     action: () => Promise<void>,
@@ -359,6 +409,40 @@
     if (busy) next.add(key);
     else next.delete(key);
     settingsBusy = next;
+  }
+
+  async function changeAgentSetting(setting: AgentSettingView, value: AgentSettingValue): Promise<void> {
+    if (agentSettingsBusy.has(setting.path)) return;
+    setAgentSettingBusy(setting.path, true);
+    settingsStatusMessage = "";
+    const sessionId =
+      current && current.state !== "stopped" && current.state !== "error" ? current.record.id : undefined;
+    try {
+      const updated = await window.branchlight.setAgentSetting(sessionId, setting.path, value);
+      agentSettings = agentSettings.map(candidate => candidate.path === updated.path ? updated : candidate);
+      settingsStatusMessage = `${updated.label} updated.${updated.apply === "next-session" ? " Starts with the next session." : ""}`;
+    } catch (error) {
+      settingsStatusMessage = error instanceof Error ? error.message : String(error);
+      showError(error);
+    } finally {
+      setAgentSettingBusy(setting.path, false);
+    }
+  }
+
+  function setAgentSettingBusy(path: string, busy: boolean): void {
+    const next = new Set(agentSettingsBusy);
+    if (busy) next.add(path);
+    else next.delete(path);
+    agentSettingsBusy = next;
+  }
+
+  function selectedAgentSettingValue(setting: AgentSettingView, rawValue: string): AgentSettingValue | undefined {
+    return setting.options?.find(option => String(option.value) === rawValue)?.value;
+  }
+
+  function changeAgentSettingFromSelect(setting: AgentSettingView, event: Event): void {
+    const value = selectedAgentSettingValue(setting, (event.currentTarget as HTMLSelectElement).value);
+    if (value !== undefined) void changeAgentSetting(setting, value);
   }
 
   async function loadCommands(sessionId: string): Promise<void> {
@@ -395,11 +479,13 @@
   async function refreshSettingsData(): Promise<void> {
     if (settingsRefreshing) return;
     settingsRefreshing = true;
-    const activeSessionId = current?.record.id;
+    const activeSessionId =
+      current && current.state !== "stopped" && current.state !== "error" ? current.record.id : undefined;
     const tasks: Promise<unknown>[] = [
       window.branchlight.getAuthStatus().then(accounts => { authAccounts = accounts; }),
+      window.branchlight.getAgentSettings(activeSessionId).then(settings => { agentSettings = settings; }),
     ];
-    if (activeSessionId && current?.state !== "stopped" && current?.state !== "error") tasks.push(loadModels(activeSessionId));
+    if (activeSessionId) tasks.push(loadModels(activeSessionId));
     const results = await Promise.allSettled(tasks);
     const failure = results.find(result => result.status === "rejected");
     if (failure?.status === "rejected") settingsStatusMessage = failure.reason instanceof Error ? failure.reason.message : String(failure.reason);
@@ -447,10 +533,53 @@
     commandMenuDismissed = true;
     void tick().then(() => composerInput?.focus());
   }
-  function modelSelectionValue(model: string | undefined): string {
-    if (!model) return "";
-    const separator = model.indexOf("/");
-    return separator < 0 ? "" : `${model.slice(0, separator)}\u0000${model.slice(separator + 1)}`;
+  function modelIdentifier(model: ModelOption): string {
+    return `${model.provider}/${model.id}`;
+  }
+
+  function filterModelOptions(
+    models: ModelOption[],
+    query: string,
+    provider: string,
+    selectedModel: string | undefined,
+  ): ModelOption[] {
+    const needle = query.trim().toLowerCase();
+    return models
+      .filter(model => provider === "all" || model.provider === provider)
+      .filter(model => !needle || `${model.name} ${model.provider} ${model.id}`.toLowerCase().includes(needle))
+      .sort((left, right) =>
+        Number(modelIdentifier(right) === selectedModel) - Number(modelIdentifier(left) === selectedModel) ||
+        left.name.localeCompare(right.name) ||
+        left.provider.localeCompare(right.provider),
+      );
+  }
+
+  function filterAuthAccounts(accounts: AuthAccountView[], query: string): AuthAccountView[] {
+    const needle = query.trim().toLowerCase();
+    return needle
+      ? accounts.filter(account => `${account.name} ${account.provider}`.toLowerCase().includes(needle))
+      : accounts;
+  }
+
+  function groupAgentSettings(
+    settings: AgentSettingView[],
+    tab: AgentSettingTab,
+  ): Array<{ name: string; settings: AgentSettingView[] }> {
+    const groups = new Map<string, AgentSettingView[]>();
+    for (const setting of settings) {
+      if (setting.tab !== tab) continue;
+      const name = setting.group ?? "General";
+      const values = groups.get(name);
+      if (values) values.push(setting);
+      else groups.set(name, [setting]);
+    }
+    return Array.from(groups, ([name, values]) => ({ name, settings: values }));
+  }
+
+  function formatContextWindow(tokens: number | undefined): string | undefined {
+    if (!tokens) return undefined;
+    if (tokens >= 1_000_000) return `${Number((tokens / 1_000_000).toFixed(1))}M context`;
+    return `${Math.round(tokens / 1_000)}K context`;
   }
 
   async function resumeSettingsSession(): Promise<void> {
@@ -494,27 +623,38 @@
       authPromptValue = "";
       authStatusMessage = event.message;
       authAccounts = await window.branchlight.getAuthStatus();
-      authBusy = false;
+      authBusyProvider = "";
     }
     if (event.type === "error") {
       authPrompt = undefined;
-      authBusy = false;
+      authBusyProvider = "";
       authStatusMessage = event.message;
     }
   }
 
-  async function loginWithChatGPT(): Promise<void> {
-    authBusy = true;
-    authStatusMessage = "Starting ChatGPT sign-in…";
-    try { authAccounts = await window.branchlight.loginProvider("openai-codex"); }
-    catch (error) { authStatusMessage = error instanceof Error ? error.message : String(error); authBusy = false; }
+  async function loginProvider(account: AuthAccountView): Promise<void> {
+    if (!account.available || authBusyProvider) return;
+    authBusyProvider = account.provider;
+    authStatusMessage = `Starting ${account.name} sign-in…`;
+    try {
+      authAccounts = await window.branchlight.loginProvider(account.provider);
+    } catch (error) {
+      authStatusMessage = error instanceof Error ? error.message : String(error);
+    } finally {
+      authBusyProvider = "";
+    }
   }
 
-  async function logoutFromChatGPT(): Promise<void> {
-    authBusy = true;
-    try { authAccounts = await window.branchlight.logoutProvider("openai-codex"); }
-    catch (error) { authStatusMessage = error instanceof Error ? error.message : String(error); }
-    finally { authBusy = false; }
+  async function logoutProvider(account: AuthAccountView): Promise<void> {
+    if (authBusyProvider) return;
+    authBusyProvider = account.provider;
+    try {
+      authAccounts = await window.branchlight.logoutProvider(account.provider);
+    } catch (error) {
+      authStatusMessage = error instanceof Error ? error.message : String(error);
+    } finally {
+      authBusyProvider = "";
+    }
   }
 
   async function submitAuthPrompt(): Promise<void> {
@@ -574,8 +714,13 @@
     }
     if (event.type === "config" && event.config) current = { ...current, ...event.config };
     if (event.type === "timeline" && event.item) {
-      const existed = current.timeline.some(candidate => candidate.id === event.item?.id);
-      const timeline = appendTimeline(current.timeline, event.item);
+      const optimisticIndex = event.item.kind === "user"
+        ? current.timeline.findIndex(candidate => candidate.id.startsWith("optimistic-user-") && candidate.text === event.item?.text)
+        : -1;
+      const existed = optimisticIndex >= 0 || current.timeline.some(candidate => candidate.id === event.item?.id);
+      const timeline = optimisticIndex >= 0
+        ? current.timeline.map((candidate, index) => index === optimisticIndex ? event.item as TimelineItem : candidate)
+        : appendTimeline(current.timeline, event.item);
       const timelineTotal = (current.timelineTotal ?? current.timeline.length) + (existed ? 0 : 1);
       current = { ...current, timeline, timelineStart: Math.max(0, timelineTotal - timeline.length), timelineTotal };
     }
@@ -615,6 +760,26 @@
     const existing = items.findIndex(candidate => candidate.id === item.id);
     if (existing < 0) return [...items, item];
     return items.map((candidate, index) => index === existing ? { ...candidate, ...item } : candidate);
+  }
+
+  let optimisticMessageSequence = 0;
+  function appendOptimisticUserMessage(sessionId: string, text: string): string {
+    optimisticMessageSequence += 1;
+    const id = `optimistic-user-${Date.now()}-${optimisticMessageSequence}`;
+    if (current?.record.id !== sessionId) return id;
+    const timeline = [...current.timeline, { id, kind: "user" as const, text, timestamp: new Date().toISOString() }];
+    const timelineTotal = (current.timelineTotal ?? current.timeline.length) + 1;
+    current = { ...current, timeline, timelineStart: Math.max(0, timelineTotal - timeline.length), timelineTotal };
+    followTimeline = true;
+    void scrollTimelineToEnd();
+    return id;
+  }
+
+  function removeOptimisticUserMessage(sessionId: string, id: string): void {
+    if (current?.record.id !== sessionId || !current.timeline.some(item => item.id === id)) return;
+    const timeline = current.timeline.filter(item => item.id !== id);
+    const timelineTotal = Math.max(0, (current.timelineTotal ?? current.timeline.length) - 1);
+    current = { ...current, timeline, timelineStart: Math.max(0, timelineTotal - timeline.length), timelineTotal };
   }
 
   function showError(error: unknown): void { errorMessage = error instanceof Error ? error.message : String(error); }
@@ -775,7 +940,11 @@
   {#if view === "settings"}
     <main class="settings-page" aria-labelledby="settings-title">
       <div class="settings-header">
-        <div><span class="eyebrow">Workspace settings</span><h1 id="settings-title">Settings</h1><p>Manage the active session runtime, turn behavior, and provider access. Changes apply immediately and stay local to OMP.</p></div>
+        <div>
+          <span class="eyebrow">Agent control center</span>
+          <h1 id="settings-title">Settings</h1>
+          <p>Shape the active runtime, choose provider accounts, and manage local OMP defaults from one place.</p>
+        </div>
         <div class="settings-header-actions">
           <button class="secondary-button" disabled={settingsRefreshing} onclick={() => void refreshSettingsData()}>{settingsRefreshing ? "Refreshing…" : "Refresh"}</button>
           <button class="secondary-button" onclick={() => view = "workspace"}>Back to workspace</button>
@@ -794,16 +963,55 @@
           <div class="settings-empty"><strong>{current.record.title ?? current.record.cwd}</strong><p>Resume this session before changing runtime settings.</p><button class="secondary-button" disabled={loading} onclick={() => void resumeSettingsSession()}>{loading ? "Resuming…" : "Resume session"}</button></div>
         {:else}
           <p class="settings-context">{current.record.title ?? current.record.cwd}<span>{current.record.cwd}</span></p>
-          <div class="settings-form-grid">
-            <label class="settings-field settings-field-wide">
-              <span>Model</span>
-              <small>The provider and model used for the next turn.</small>
-              <select aria-label="Session model" value={modelSelectionValue(current.model)} disabled={modelsLoading || settingsBusy.has("model")} onchange={(event) => void changeModel((event.currentTarget as HTMLSelectElement).value)}>
-                {#if modelsLoading}<option value={modelSelectionValue(current.model)}>Loading available models…</option>
-                {:else if availableModels.length === 0}<option value={modelSelectionValue(current.model)}>{current.model ?? "Provider default"}</option>
-                {:else}{#each availableModels as model (`${model.provider}:${model.id}`)}<option value={`${model.provider}\u0000${model.id}`}>{model.name} · {model.provider}</option>{/each}{/if}
-              </select>
-            </label>
+          <div class="model-picker">
+            <div class="model-picker-head">
+              <div>
+                <span>Current model</span>
+                <strong>{selectedModelOption?.name ?? current.model ?? "Provider default"}</strong>
+                <small>{selectedModelOption ? `${selectedModelOption.provider} / ${selectedModelOption.id}` : current.model ?? "Inherited from OMP"}</small>
+              </div>
+              {#if selectedModelOption?.reasoning}<span class="model-badge">Reasoning</span>{/if}
+            </div>
+            <div class="model-picker-controls">
+              <label>
+                <span class="sr-only">Search models</span>
+                <input type="search" aria-label="Search models" placeholder="Search by model, provider, or ID" bind:value={modelQuery} />
+              </label>
+              <label>
+                <span class="sr-only">Filter models by provider</span>
+                <select aria-label="Filter models by provider" bind:value={modelProviderFilter}>
+                  <option value="all">All providers</option>
+                  {#each modelProviders as provider (provider)}<option value={provider}>{provider}</option>{/each}
+                </select>
+              </label>
+            </div>
+            {#if modelsLoading}
+              <div class="settings-empty compact"><p>Loading available models…</p></div>
+            {:else if visibleModels.length === 0}
+              <div class="settings-empty compact"><p>No models match these filters.</p></div>
+            {:else}
+              <div class="model-results" role="listbox" aria-label="Available models">
+                {#each visibleModels as model (`${model.provider}:${model.id}`)}
+                  {@const contextLabel = formatContextWindow(model.contextWindow)}
+                  <button
+                    type="button"
+                    class="model-option"
+                    class:selected={modelIdentifier(model) === current.model}
+                    role="option"
+                    aria-selected={modelIdentifier(model) === current.model}
+                    aria-label={`Use ${model.name} from ${model.provider}`}
+                    disabled={settingsBusy.has("model")}
+                    onclick={() => void changeModel(model)}
+                  >
+                    <span class="model-option-copy"><strong>{model.name}</strong><small>{model.provider} / {model.id}</small></span>
+                    <span class="model-badges">{#if model.reasoning}<span>Reasoning</span>{/if}{#if contextLabel}<span>{contextLabel}</span>{/if}</span>
+                  </button>
+                {/each}
+              </div>
+              <p class="model-result-note">Showing {visibleModels.length} of {filteredModels.length} matching models{filteredModels.length > visibleModels.length ? " — refine your search to see more" : ""}.</p>
+            {/if}
+          </div>
+          <div class="settings-form-grid runtime-options">
             <label class="settings-field">
               <span>Thinking level</span>
               <small>Reasoning depth for the active session.</small>
@@ -820,29 +1028,93 @@
       </section>
 
       <section class="settings-section" aria-labelledby="turn-title">
-        <div class="settings-section-heading"><div><span class="eyebrow">TUI parity</span><h2 id="turn-title">Turn behavior</h2></div></div>
-        <p class="settings-copy">The same queue, interrupt, and compaction controls used by the terminal interface.</p>
+        <div class="settings-section-heading"><div><span class="eyebrow">Per session</span><h2 id="turn-title">Turn behavior</h2></div></div>
+        <p class="settings-copy">Queue, interruption, compaction, and retry controls for the active runtime.</p>
         {#if current && current.state !== "stopped" && current.state !== "error"}
           <div class="settings-form-grid">
             <label class="settings-field"><span>Steering delivery</span><small>How messages steer an active turn.</small><select aria-label="Steering delivery" value={current.steeringMode ?? "all"} disabled={settingsBusy.has("steering")} onchange={(event) => void changeQueueSetting("steering", (event.currentTarget as HTMLSelectElement).value as QueueMode)}><option value="all">Deliver all</option><option value="one-at-a-time">One at a time</option></select></label>
             <label class="settings-field"><span>Follow-up delivery</span><small>How queued messages enter subsequent turns.</small><select aria-label="Follow-up delivery" value={current.followUpMode ?? "all"} disabled={settingsBusy.has("follow-up")} onchange={(event) => void changeQueueSetting("follow-up", (event.currentTarget as HTMLSelectElement).value as QueueMode)}><option value="all">Deliver all</option><option value="one-at-a-time">One at a time</option></select></label>
             <label class="settings-field"><span>Interrupt behavior</span><small>Whether new input interrupts immediately or waits.</small><select aria-label="Interrupt behavior" value={current.interruptMode ?? "immediate"} disabled={settingsBusy.has("interrupt")} onchange={(event) => void changeInterruptSetting((event.currentTarget as HTMLSelectElement).value as InterruptMode)}><option value="immediate">Interrupt immediately</option><option value="wait">Wait for a safe boundary</option></select></label>
             <label class="settings-toggle"><span><strong>Automatic compaction</strong><small>Compact context before it reaches the model limit.</small></span><input type="checkbox" aria-label="Automatic compaction" checked={current.autoCompactionEnabled !== false} disabled={settingsBusy.has("compaction")} onchange={(event) => void changeAutoCompaction((event.currentTarget as HTMLInputElement).checked)} /></label>
+            <label class="settings-toggle"><span><strong>Automatic retry</strong><small>Retry recoverable provider failures without a manual resend.</small></span><input type="checkbox" aria-label="Automatic retry" checked={current.autoRetryEnabled !== false} disabled={settingsBusy.has("retry")} onchange={(event) => void changeAutoRetry((event.currentTarget as HTMLInputElement).checked)} /></label>
           </div>
         {:else}
           <div class="settings-empty compact"><p>Turn behavior becomes available when the active session is running.</p></div>
         {/if}
       </section>
 
-      <section class="settings-section" aria-labelledby="provider-title">
-        <div class="settings-section-heading"><div><span class="eyebrow">Provider access</span><h2 id="provider-title">ChatGPT Plus/Pro</h2></div><span class:connected={authAccounts.some(account => account.signedIn)} class="provider-state">{authAccounts.some(account => account.signedIn) ? "Connected" : "Not connected"}</span></div>
-        <p class="settings-copy">Use your ChatGPT subscription for Codex sessions and native image generation. Sign-in opens the official browser flow.</p>
-        {#if authAccounts.some(account => account.signedIn)}
-          {@const account = authAccounts.find(candidate => candidate.signedIn)}
-          <dl class="account-details"><dt>Account</dt><dd>{account?.email ?? "ChatGPT account"}</dd>{#if account?.orgName}<dt>Workspace</dt><dd>{account.orgName}</dd>{/if}</dl>
-          <button class="secondary-button" disabled={authBusy} onclick={() => void logoutFromChatGPT()}>Sign out</button>
+      <section class="settings-section agent-settings-section" aria-labelledby="agent-settings-title">
+        <div class="settings-section-heading">
+          <div><span class="eyebrow">Local OMP preferences</span><h2 id="agent-settings-title">Agent defaults</h2></div>
+          <span class="count-badge">{agentSettings.length}</span>
+        </div>
+        <p class="settings-copy">Credential-free defaults shared with OMP. Changes marked “Next session” require a new or reconnected runtime.</p>
+        {#if agentSettings.length === 0}
+          <div class="settings-empty compact"><p>{settingsRefreshing ? "Loading agent settings…" : "No configurable agent defaults were reported."}</p></div>
         {:else}
-          <button class="primary-button" disabled={authBusy} onclick={() => void loginWithChatGPT()}>{authBusy ? "Waiting for browser sign-in…" : "Sign in with ChatGPT"} <span>→</span></button>
+          <div class="settings-tablist" role="tablist" aria-label="Agent setting categories">
+            {#each availableAgentSettingTabs as tab (tab.id)}
+              <button type="button" role="tab" aria-selected={selectedAgentSettingsTab === tab.id} class:active={selectedAgentSettingsTab === tab.id} onclick={() => selectedAgentSettingsTab = tab.id}>{tab.label}</button>
+            {/each}
+          </div>
+          <div class="agent-settings-panel" role="tabpanel" aria-label={AGENT_SETTING_TABS.find(tab => tab.id === selectedAgentSettingsTab)?.label}>
+            {#each agentSettingGroups as group (group.name)}
+              <section class="agent-settings-group" aria-labelledby={`agent-setting-${selectedAgentSettingsTab}-${group.name.replaceAll(" ", "-").toLowerCase()}`}>
+                <h3 id={`agent-setting-${selectedAgentSettingsTab}-${group.name.replaceAll(" ", "-").toLowerCase()}`}>{group.name}</h3>
+                <div class="settings-form-grid">
+                  {#each group.settings as setting (setting.path)}
+                    {#if setting.control === "toggle"}
+                      <label class="settings-toggle">
+                        <span><strong>{setting.label}</strong><small>{setting.description}</small>{#if setting.apply === "next-session"}<span class="setting-scope">Next session</span>{/if}</span>
+                        <input type="checkbox" aria-label={setting.label} checked={setting.value === true} disabled={agentSettingsBusy.has(setting.path)} onchange={(event) => void changeAgentSetting(setting, (event.currentTarget as HTMLInputElement).checked)} />
+                      </label>
+                    {:else}
+                      <label class="settings-field">
+                        <span>{setting.label}{#if setting.apply === "next-session"}<span class="setting-scope">Next session</span>{/if}</span>
+                        <small>{setting.description}</small>
+                        <select aria-label={setting.label} value={String(setting.value)} disabled={agentSettingsBusy.has(setting.path)} onchange={(event) => changeAgentSettingFromSelect(setting, event)}>
+                          {#each setting.options ?? [] as option (`${setting.path}:${String(option.value)}`)}
+                            <option value={String(option.value)} title={option.description}>{option.label}</option>
+                          {/each}
+                        </select>
+                      </label>
+                    {/if}
+                  {/each}
+                </div>
+              </section>
+            {/each}
+          </div>
+        {/if}
+      </section>
+
+      <section class="settings-section" aria-labelledby="provider-title">
+        <div class="settings-section-heading">
+          <div><span class="eyebrow">Provider access</span><h2 id="provider-title">Provider accounts</h2></div>
+          <span class:connected={signedInAccountCount > 0} class="provider-state">{signedInAccountCount === 1 ? "1 connected" : `${signedInAccountCount} connected`}</span>
+        </div>
+        <p class="settings-copy">Every OAuth provider advertised by the local OMP runtime. Authentication opens the provider’s official browser flow.</p>
+        <label class="provider-search"><span class="sr-only">Search providers</span><input type="search" aria-label="Search providers" placeholder="Search providers" bind:value={authQuery} /></label>
+        {#if filteredAuthAccounts.length === 0}
+          <div class="settings-empty compact"><p>{authAccounts.length === 0 ? "No OAuth providers were reported by OMP." : "No providers match this search."}</p></div>
+        {:else}
+          <div class="provider-list">
+            {#each filteredAuthAccounts as account (account.provider)}
+              <article class="provider-row">
+                <div class="provider-copy">
+                  <span class="provider-name"><strong>{account.name}</strong><span class="mono">{account.provider}</span></span>
+                  <small>{account.signedIn ? account.email ?? account.orgName ?? "Authenticated locally" : account.available ? "Ready to connect" : "Not available in this runtime"}</small>
+                </div>
+                <div class="provider-actions">
+                  <span class:connected={account.signedIn} class:unavailable={!account.available} class="provider-state">{account.signedIn ? "Connected" : account.available ? "Available" : "Unavailable"}</span>
+                  {#if account.signedIn}
+                    <button type="button" class="secondary-button" aria-label={`Sign out of ${account.name}`} disabled={Boolean(authBusyProvider)} onclick={() => void logoutProvider(account)}>{authBusyProvider === account.provider ? "Signing out…" : "Sign out"}</button>
+                  {:else if account.available}
+                    <button type="button" class="primary-button" aria-label={`Sign in to ${account.name}`} disabled={Boolean(authBusyProvider)} onclick={() => void loginProvider(account)}>{authBusyProvider === account.provider ? "Waiting for sign-in…" : "Sign in"} <span>→</span></button>
+                  {/if}
+                </div>
+              </article>
+            {/each}
+          </div>
         {/if}
         {#if authStatusMessage}<p class="settings-status" role="status">{authStatusMessage}</p>{/if}
       </section>

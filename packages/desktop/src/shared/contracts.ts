@@ -22,6 +22,27 @@ export interface ModelOption {
 	contextWindow?: number;
 }
 
+export type AgentSettingValue = boolean | string | number;
+export type AgentSettingTab = "appearance" | "model" | "interaction" | "context" | "tools" | "tasks";
+
+export interface AgentSettingOption {
+	value: AgentSettingValue;
+	label: string;
+	description?: string;
+}
+
+export interface AgentSettingView {
+	path: string;
+	tab: AgentSettingTab;
+	group?: string;
+	label: string;
+	description: string;
+	control: "toggle" | "select";
+	value: AgentSettingValue;
+	options?: AgentSettingOption[];
+	apply: "immediate" | "next-session";
+}
+
 export interface SessionRuntimeConfig {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
@@ -30,6 +51,7 @@ export interface SessionRuntimeConfig {
 	followUpMode?: QueueMode;
 	interruptMode?: InterruptMode;
 	autoCompactionEnabled?: boolean;
+	autoRetryEnabled?: boolean;
 }
 
 export interface SessionRecordV1 {
@@ -113,8 +135,9 @@ export interface SessionSnapshot extends SessionRuntimeConfig {
 }
 
 export interface AuthAccountView {
-	provider: "openai-codex";
+	provider: string;
 	name: string;
+	available: boolean;
 	signedIn: boolean;
 	email?: string;
 	accountId?: string;
@@ -122,11 +145,11 @@ export interface AuthAccountView {
 }
 
 export type AuthEvent =
-	| { type: "progress"; provider: "openai-codex"; message: string }
-	| { type: "auth-url"; provider: "openai-codex"; message: string; url?: string }
-	| { type: "prompt"; provider: "openai-codex"; message: string; placeholder?: string; sensitive: true }
-	| { type: "complete"; provider: "openai-codex"; message: string }
-	| { type: "error"; provider: "openai-codex"; message: string };
+	| { type: "progress"; provider: string; message: string }
+	| { type: "auth-url"; provider: string; message: string; url?: string }
+	| { type: "prompt"; provider: string; message: string; placeholder?: string; sensitive: true }
+	| { type: "complete"; provider: string; message: string }
+	| { type: "error"; provider: string; message: string };
 
 export interface BootstrapSnapshot {
 	registry: SessionRegistryV1;
@@ -180,9 +203,11 @@ export interface ExtensionView {
 
 export interface BranchlightApi {
 	getAuthStatus(): Promise<AuthAccountView[]>;
-	loginProvider(provider: "openai-codex"): Promise<AuthAccountView[]>;
-	logoutProvider(provider: "openai-codex"): Promise<AuthAccountView[]>;
+	loginProvider(provider: string): Promise<AuthAccountView[]>;
+	logoutProvider(provider: string): Promise<AuthAccountView[]>;
 	respondAuthPrompt(value: string): Promise<void>;
+	getAgentSettings(id?: string): Promise<AgentSettingView[]>;
+	setAgentSetting(id: string | undefined, path: string, value: AgentSettingValue): Promise<AgentSettingView>;
 	bootstrap(): Promise<BootstrapSnapshot>;
 	chooseAndCreate(kind: SessionKind): Promise<SessionSnapshot | null>;
 	openSession(id: string): Promise<SessionSnapshot>;
@@ -203,6 +228,7 @@ export interface BranchlightApi {
 	setQueueMode(id: string, kind: "steering" | "follow-up", mode: QueueMode): Promise<void>;
 	setInterruptMode(id: string, mode: InterruptMode): Promise<void>;
 	setAutoCompaction(id: string, enabled: boolean): Promise<void>;
+	setAutoRetry(id: string, enabled: boolean): Promise<void>;
 	extensionResponse(id: string, response: unknown): Promise<void>;
 	getSubagentMessages(id: string, subagentId: string, fromByte: number): Promise<unknown>;
 	openWorkspaceFile(id: string, target: string): Promise<void>;

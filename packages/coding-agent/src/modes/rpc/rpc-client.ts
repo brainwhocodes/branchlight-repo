@@ -33,6 +33,8 @@ import type {
 	RpcHostToolUpdate,
 	RpcResponse,
 	RpcSessionState,
+	RpcSettingValue,
+	RpcSettingView,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
@@ -608,6 +610,22 @@ export class RpcClient {
 					? state.tokensPerSecond
 					: null,
 		};
+	}
+
+	/**
+	 * Get the curated, credential-free settings available to RPC hosts.
+	 */
+	async getSettings(): Promise<RpcSettingView[]> {
+		const response = await this.#send({ type: "get_settings" });
+		return this.#getData<{ settings: RpcSettingView[] }>(response).settings;
+	}
+
+	/**
+	 * Persist one setting exposed by {@link getSettings}.
+	 */
+	async setSetting(path: string, value: RpcSettingValue): Promise<RpcSettingView> {
+		const response = await this.#send({ type: "set_setting", path, value });
+		return this.#getData<{ setting: RpcSettingView }>(response).setting;
 	}
 
 	/**
