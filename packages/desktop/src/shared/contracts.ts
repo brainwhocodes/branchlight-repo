@@ -184,6 +184,39 @@ export type AuthEvent =
 	| { type: "complete"; provider: string; message: string }
 	| { type: "error"; provider: string; message: string };
 
+export type WorkspacePaneKind = "browser" | "terminal";
+export type BrowserNavigationAction = "back" | "forward" | "reload" | "stop";
+
+export interface BrowserBounds {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+export interface BrowserViewState {
+	id: string;
+	url: string;
+	title: string;
+	canGoBack: boolean;
+	canGoForward: boolean;
+	loading: boolean;
+	error?: string;
+}
+
+export interface TerminalViewState {
+	id: string;
+	cwd: string;
+}
+
+export type WorkspaceEvent =
+	| { type: "browser-state"; paneId: string; state: BrowserViewState }
+	| { type: "browser-focus"; paneId: string }
+	| { type: "browser-new-window"; paneId: string; url: string }
+	| { type: "terminal-data"; paneId: string; data: string }
+	| { type: "terminal-exit"; paneId: string; exitCode: number }
+	| { type: "terminal-error"; paneId: string; message: string };
+
 export interface BootstrapSnapshot {
 	registry: SessionRegistryV1;
 	warning?: string;
@@ -274,11 +307,23 @@ export interface BranchlightApi {
 	loadFileDiff(id: string, target: string): Promise<FileDiffView>;
 	openWorkspaceFile(id: string, target: string): Promise<void>;
 	openExternal(url: string): Promise<void>;
+	createBrowser(id: string, url: string): Promise<BrowserViewState>;
+	nameBrowser(id: string, name: string): Promise<void>;
+	navigateBrowser(id: string, url: string): Promise<BrowserViewState>;
+	controlBrowser(id: string, action: BrowserNavigationAction): Promise<void>;
+	setBrowserBounds(id: string, bounds: BrowserBounds): Promise<void>;
+	setVisibleBrowsers(ids: string[]): Promise<void>;
+	closeBrowser(id: string): Promise<void>;
+	createTerminal(id: string, cols: number, rows: number): Promise<TerminalViewState>;
+	writeTerminal(id: string, data: string): Promise<void>;
+	resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
+	closeTerminal(id: string): Promise<void>;
 	minimizeWindow(): Promise<void>;
 	toggleMaximizeWindow(): Promise<boolean>;
 	closeWindow(): Promise<void>;
 	onEvent(listener: (event: BranchlightEvent) => void): () => void;
 	onAuthEvent(listener: (event: AuthEvent) => void): () => void;
+	onWorkspaceEvent(listener: (event: WorkspaceEvent) => void): () => void;
 }
 
 declare global {

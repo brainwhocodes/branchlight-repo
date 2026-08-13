@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Branchlight Browser Fixture</title>
+	</head>
+	<body>
+		<main>
+			<h1>Browser workspace ready</h1>
+			<button type="button" id="fixture-action">Interact</button>
+			<output id="fixture-output">Waiting</output>
+		</main>
+		<script>
+			document.querySelector("#fixture-action").addEventListener("click", () => {
+				document.querySelector("#fixture-output").textContent = "Connected";
+			});
+		</script>
+	</body>
+</html>

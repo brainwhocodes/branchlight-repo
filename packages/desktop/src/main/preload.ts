@@ -7,6 +7,9 @@ import type {
 	BootstrapSnapshot,
 	BranchlightApi,
 	BranchlightEvent,
+	BrowserBounds,
+	BrowserNavigationAction,
+	BrowserViewState,
 	FileDiffView,
 	InterruptMode,
 	ModelOption,
@@ -14,9 +17,11 @@ import type {
 	QueueMode,
 	SessionSnapshot,
 	SlashCommand,
+	TerminalViewState,
 	ThinkingLevel,
 	TimelineItem,
 	TimelinePage,
+	WorkspaceEvent,
 } from "../shared/contracts";
 
 const MAX_BYTES = 512 * 1024;
@@ -36,6 +41,39 @@ function sessionName(value: unknown): string {
 
 function sessionId(value: unknown): string {
 	if (typeof value !== "string" || value.length < 8 || value.length > 100) throw new TypeError("invalid session id");
+	return value;
+}
+
+function paneId(value: unknown): string {
+	if (typeof value !== "string" || !/^[a-z0-9-]{8,100}$/i.test(value)) throw new TypeError("invalid pane id");
+	return value;
+}
+
+function terminalDimension(value: unknown, label: string): number {
+	if (!Number.isSafeInteger(value) || (value as number) < 2 || (value as number) > 500)
+		throw new RangeError(`${label} must be between 2 and 500`);
+	return value as number;
+}
+
+function browserBounds(value: unknown): BrowserBounds {
+	if (typeof value !== "object" || value === null) throw new TypeError("invalid browser bounds");
+	const bounds = value as Record<string, unknown>;
+	for (const key of ["x", "y", "width", "height"] as const) {
+		const coordinate = bounds[key];
+		if (!Number.isFinite(coordinate) || Math.abs(coordinate as number) > 32_768)
+			throw new RangeError(`invalid browser ${key}`);
+	}
+	return {
+		x: Math.round(bounds.x as number),
+		y: Math.round(bounds.y as number),
+		width: Math.max(0, Math.round(bounds.width as number)),
+		height: Math.max(0, Math.round(bounds.height as number)),
+	};
+}
+
+function browserAction(value: unknown): BrowserNavigationAction {
+	if (value !== "back" && value !== "forward" && value !== "reload" && value !== "stop")
+		throw new TypeError("invalid browser action");
 	return value;
 }
 
@@ -200,6 +238,38 @@ const api: BranchlightApi = {
 			text(target, "workspace target"),
 		) as Promise<void>,
 	openExternal: url => ipcRenderer.invoke("branchlight:open-external", text(url, "URL")) as Promise<void>,
+	createBrowser: (id, url) =>
+		ipcRenderer.invoke("branchlight:browser-create", paneId(id), text(url, "URL")) as Promise<BrowserViewState>,
+	nameBrowser: (id, name) =>
+		ipcRenderer.invoke("branchlight:browser-name", paneId(id), sessionName(name)) as Promise<void>,
+	navigateBrowser: (id, url) =>
+		ipcRenderer.invoke("branchlight:browser-navigate", paneId(id), text(url, "URL")) as Promise<BrowserViewState>,
+	controlBrowser: (id, action) =>
+		ipcRenderer.invoke("branchlight:browser-control", paneId(id), browserAction(action)) as Promise<void>,
+	setBrowserBounds: (id, bounds) =>
+		ipcRenderer.invoke("branchlight:browser-bounds", paneId(id), browserBounds(bounds)) as Promise<void>,
+	setVisibleBrowsers: ids => {
+		if (!Array.isArray(ids) || ids.length > 32) throw new RangeError("invalid visible browser list");
+		return ipcRenderer.invoke("branchlight:browser-visible", ids.map(paneId)) as Promise<void>;
+	},
+	closeBrowser: id => ipcRenderer.invoke("branchlight:browser-close", paneId(id)) as Promise<void>,
+	createTerminal: (id, cols, rows) =>
+		ipcRenderer.invoke(
+			"branchlight:terminal-create",
+			paneId(id),
+			terminalDimension(cols, "columns"),
+			terminalDimension(rows, "rows"),
+		) as Promise<TerminalViewState>,
+	writeTerminal: (id, data) =>
+		ipcRenderer.invoke("branchlight:terminal-write", paneId(id), text(data, "terminal input")) as Promise<void>,
+	resizeTerminal: (id, cols, rows) =>
+		ipcRenderer.invoke(
+			"branchlight:terminal-resize",
+			paneId(id),
+			terminalDimension(cols, "columns"),
+			terminalDimension(rows, "rows"),
+		) as Promise<void>,
+	closeTerminal: id => ipcRenderer.invoke("branchlight:terminal-close", paneId(id)) as Promise<void>,
 	minimizeWindow: () => ipcRenderer.invoke("branchlight:window-minimize") as Promise<void>,
 	toggleMaximizeWindow: () => ipcRenderer.invoke("branchlight:window-toggle-maximize") as Promise<boolean>,
 	closeWindow: () => ipcRenderer.invoke("branchlight:window-close") as Promise<void>,
@@ -212,6 +282,11 @@ const api: BranchlightApi = {
 		const handler = (_event: Electron.IpcRendererEvent, value: AuthEvent) => listener(value);
 		ipcRenderer.on("branchlight:auth", handler);
 		return () => ipcRenderer.removeListener("branchlight:auth", handler);
+	},
+	onWorkspaceEvent: listener => {
+		const handler = (_event: Electron.IpcRendererEvent, value: WorkspaceEvent) => listener(value);
+		ipcRenderer.on("branchlight:workspace", handler);
+		return () => ipcRenderer.removeListener("branchlight:workspace", handler);
 	},
 };
 

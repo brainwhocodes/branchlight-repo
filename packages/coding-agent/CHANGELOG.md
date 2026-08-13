@@ -8,11 +8,13 @@
 - Added provider exclusions for native image generation so hosts can prevent unsupported providers from being selected as fallbacks or per-request overrides.
 - Added bounded working-tree file diffs and lazy OpenRouter upstream discovery to the RPC protocol for desktop and other external hosts.
 - Added persisted per-model OpenRouter provider exclusions, applied consistently to primary, advisor, handoff, and side-channel requests.
+- Added the Branchlight desktop PTY worker and repository-aware argument-free `omp` launcher.
 
 ### Changed
 
 - Changed ChatGPT/Codex subscription image generation to use the Codex Responses API's native `image_generation` tool, routed through the connected GPT model and backed by `gpt-image-2`; custom proxies keep their hosted Responses base URL.
 - Changed image generation to emit an immediate progress update while the provider is still generating the image.
+- Changed the browser tool to inherit Branchlight's loopback CDP endpoint and resolve non-default browser tool names against named workspace tabs.
 
 ### Fixed
 

@@ -1,33 +1,9 @@
-import * as net from "node:net";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Browser, Page } from "puppeteer-core";
 import { ToolError, throwIfAborted } from "../tool-errors";
 
 const ATTACH_TARGET_SKIP_PATTERN =
 	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker/i;
-
-/**
- * Allocate an unused TCP port on 127.0.0.1 by binding to port 0 and reading
- * back the kernel-assigned port. There's a small race between close and the
- * subsequent bind in the launched app, but Chromium's listener will retry.
- */
-export async function findFreeCdpPort(): Promise<number> {
-	const { promise, resolve, reject } = Promise.withResolvers<number>();
-	const server = net.createServer();
-	server.unref();
-	server.once("error", reject);
-	server.listen(0, "127.0.0.1", () => {
-		const addr = server.address();
-		if (addr && typeof addr === "object" && typeof addr.port === "number") {
-			const port = addr.port;
-			server.close(closeErr => (closeErr ? reject(closeErr) : resolve(port)));
-		} else {
-			server.close();
-			reject(new Error("Failed to allocate ephemeral CDP port"));
-		}
-	});
-	return promise;
-}
 
 /** Poll `${cdpUrl}/json/version` until it responds with 200, with abort + timeout support. */
 export async function waitForCdp(cdpUrl: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {

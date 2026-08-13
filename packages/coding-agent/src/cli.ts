@@ -27,8 +27,12 @@ import {
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import { DESKTOP_TERMINAL_WORKER_ARG } from "@oh-my-pi/pi-wire";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
+import { launchWorkspaceFromCurrentRepo } from "./desktop-terminal/launcher";
+import { smokeTestDesktopTerminalWorker } from "./desktop-terminal/smoke";
+import { startDesktopTerminalWorker } from "./desktop-terminal/worker";
 import { startJsEvalProcess } from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
@@ -118,6 +122,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestMnemopiEmbedWorker();
 	await smokeTestDaemonBroker();
 	await smokeTestLspMux();
+	await smokeTestDesktopTerminalWorker();
 	await smokeTestTerminalOutputWorker();
 	process.stdout.write("smoke-test: ok\n");
 }
@@ -203,6 +208,10 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
 		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
 		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
+		return true;
+	}
+	if (arg === DESKTOP_TERMINAL_WORKER_ARG) {
+		await startDesktopTerminalWorker();
 		return true;
 	}
 	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {
@@ -397,6 +406,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		await runSmokeTest();
 		return;
 	}
+	if (isProcessEntry && resolvedArgv.length === 0 && (await launchWorkspaceFromCurrentRepo(process.cwd()))) return;
 	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
 		import("@oh-my-pi/pi-utils/cli"),
 		import("./cli-commands"),

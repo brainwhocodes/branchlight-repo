@@ -22,6 +22,10 @@ Sass
 Copyright (c) 2006–present Sass maintainers
 MIT License: https://github.com/sass/dart-sass/blob/1.102.0/LICENSE
 
+ghostty-web 0.4.0
+Copyright (c) 2025 Coder
+MIT License: https://github.com/coder/ghostty-web/blob/v0.4.0/LICENSE
+
 Fontsource Sora and Nunito Sans variable packages
 Font software is licensed under the SIL Open Font License 1.1.
 https://scripts.sil.org/OFL

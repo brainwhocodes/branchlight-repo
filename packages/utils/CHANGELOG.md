@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `findFreeTcpPort` for shared loopback port allocation.
+
 ## [17.2.11] - 2026-08-07
 
 ### Added

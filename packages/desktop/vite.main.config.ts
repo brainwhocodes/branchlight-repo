@@ -5,12 +5,15 @@ export default defineConfig({
 		rollupOptions: {
 			external: [
 				"electron",
+				"node:async_hooks",
 				"node:child_process",
 				"node:fs",
 				"node:fs/promises",
 				"node:path",
 				"node:os",
 				"node:url",
+				"node:net",
+				"node:util/types",
 				"node:crypto",
 			],
 		},

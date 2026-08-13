@@ -1,8 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import * as path from "node:path";
-import { app } from "electron";
 import type { ProcessState } from "../shared/contracts";
 import type { RpcExtensionUIRequest } from "../shared/rpc-wire";
+import { ompExecutablePath, rpcConfigPath } from "./backend-path";
 import { RpcClient } from "./rpc-client";
 
 type ProcessOptions = {
@@ -38,12 +37,8 @@ export class RpcProcess {
 		if (this.#state !== "stopped" && this.#state !== "error") throw new Error(`Cannot start from ${this.#state}`);
 		this.#setState("starting");
 		const fixture = process.env.BRANCHLIGHT_RPC_FIXTURE;
-		const executable = app.isPackaged
-			? path.join(process.resourcesPath, "omp.exe")
-			: path.resolve(__dirname, "../../../../packages/coding-agent/dist/omp.exe");
-		const configPath = app.isPackaged
-			? path.join(process.resourcesPath, "rpc-config.yml")
-			: path.resolve(__dirname, "../../../../packages/desktop/resources/rpc-config.yml");
+		const executable = ompExecutablePath();
+		const configPath = rpcConfigPath();
 		const args = fixture
 			? [fixture, "--mode", "rpc", "--cwd", this.#options.cwd]
 			: ["--mode", "rpc", "--cwd", this.#options.cwd, "--config", configPath];

@@ -442,3 +442,35 @@ export type RelayControlToHost = { t: "peer-joined" | "peer-left"; peer: number 
 /** Relay → guest control message. */
 export type RelayControlToGuest = { t: "room-closed" };
 export type RelayControlMessage = RelayControlToHost | RelayControlToGuest;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Desktop terminal bridge (JSONL over stdio)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Hidden CLI selector used by the desktop shell to host Bun's native PTY runtime. */
+export const DESKTOP_TERMINAL_WORKER_ARG = "__omp_worker_desktop_terminal";
+
+export interface DesktopTerminalStartRequest {
+	type: "start";
+	id: string;
+	shell: string;
+	args: string[];
+	cwd: string;
+	cols: number;
+	rows: number;
+	env: Record<string, string>;
+}
+
+export type DesktopTerminalRequest =
+	| DesktopTerminalStartRequest
+	| { type: "input"; id: string; data: string }
+	| { type: "resize"; id: string; cols: number; rows: number }
+	| { type: "close"; id: string }
+	| { type: "shutdown" };
+
+export type DesktopTerminalEvent =
+	| { type: "ready" }
+	| { type: "started"; id: string; cwd: string }
+	| { type: "data"; id: string; data: string }
+	| { type: "exit"; id: string; exitCode: number }
+	| { type: "error"; id?: string; message: string };

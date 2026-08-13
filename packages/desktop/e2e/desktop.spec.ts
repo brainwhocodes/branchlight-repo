@@ -1,275 +1,148 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import AxeBuilder from "@axe-core/playwright";
+import { _electron as electron, expect, test } from "@playwright/test";
+import { mkdtemp } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { _electron as electron, expect, test } from "@playwright/test";
-import AxeBuilder from "@axe-core/playwright";
+import { connect } from "puppeteer-core";
 
 const desktopRoot = path.resolve(".");
 const mainBundle = path.join(desktopRoot, ".vite", "build", "main.js");
 const electronBinary = path.join(desktopRoot, "node_modules", "electron", "dist", "electron.exe");
-const fixture = path.join(desktopRoot, "e2e", "rpc-fixture.cjs");
+const terminalFixture = path.join(desktopRoot, "e2e", "terminal-fixture.cjs");
+const browserFixtureUrl = "http://localhost:5173/browser-fixture.html";
 
-test("covers Work and Code session supervision", async () => {
-  const userData = await mkdtemp(path.join(os.tmpdir(), "branchlight-e2e-"));
-  const workFolder = await mkdtemp(path.join(os.tmpdir(), "branchlight-work-"));
-  const codeFolder = await mkdtemp(path.join(os.tmpdir(), "branchlight-code-"));
-  const now = new Date().toISOString();
-  const workSessionFile = path.join(workFolder, ".branchlight-fixture.jsonl");
-  const codeSessionFile = path.join(codeFolder, ".branchlight-fixture.jsonl");
-  await writeFile(workSessionFile, "fixture\n", "utf8");
-  await writeFile(codeSessionFile, "fixture\n", "utf8");
-  await writeFile(path.join(userData, "sessions-v1.json"), JSON.stringify({
-    version: 1,
-    sessions: [
-      { id: "work-session-0001", kind: "work", cwd: workFolder, ompSessionId: "fixture-session-0001", sessionFile: workSessionFile, title: "Research workspace", createdAt: now, lastOpenedAt: now },
-      { id: "code-session-0001", kind: "code", cwd: codeFolder, ompSessionId: "fixture-session-0001", sessionFile: codeSessionFile, title: "Review repository", createdAt: now, lastOpenedAt: now },
-    ],
-    activeByKind: { work: "work-session-0001", code: "code-session-0001" },
-  }, null, 2), "utf8");
+test("runs homogeneous terminal and named browser workspaces", async () => {
+	const userData = await mkdtemp(path.join(os.tmpdir(), "branchlight-workspace-e2e-"));
+	const app = await electron.launch({
+		executablePath: electronBinary,
+		args: [`--user-data-dir=${userData}`, mainBundle],
+		env: {
+			...process.env,
+			BRANCHLIGHT_AUTH_FILE: path.join(userData, "auth-state"),
+			BRANCHLIGHT_NODE: "node",
+			BRANCHLIGHT_TERMINAL_FIXTURE: terminalFixture,
+			BRANCHLIGHT_WORKSPACE: desktopRoot,
+			ELECTRON_ENABLE_SECURITY_WARNINGS: "1",
+		},
+	});
 
-  const app = await electron.launch({
-    executablePath: electronBinary,
-    args: [`--user-data-dir=${userData}`, mainBundle],
-    env: { ...process.env, BRANCHLIGHT_RPC_FIXTURE: fixture, BRANCHLIGHT_NODE: "node", BRANCHLIGHT_AUTH_FILE: path.join(userData, "auth-state"), ELECTRON_ENABLE_SECURITY_WARNINGS: "1" },
-  });
-  const page = await app.firstWindow();
-  const consoleErrors: string[] = [];
-  page.on("console", message => {
-    if (message.type() === "error") consoleErrors.push(message.text());
-  });
-  page.on("pageerror", error => consoleErrors.push(error.message));
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await expect.poll(() => page.evaluate(() => document.styleSheets.length), { timeout: 8_000 }).toBeGreaterThan(0);
-  await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).backgroundColor), { timeout: 8_000 }).toBe("rgb(245, 248, 251)");
-  const desktopTabs = await page.locator(".mode-tabs").boundingBox();
-  expect(desktopTabs).not.toBeNull();
-  expect(Math.abs((desktopTabs?.x ?? 0) + (desktopTabs?.width ?? 0) / 2 - 720)).toBeLessThan(4);
-  await expect(page.getByRole("button", { name: "Minimize Branchlight" })).toBeVisible();
-  await page.getByRole("button", { name: "Maximize Branchlight" }).click();
-  await expect(page.getByRole("button", { name: "Restore Branchlight" })).toBeVisible();
-  await page.getByRole("button", { name: "Restore Branchlight" }).click();
-  await page.getByRole("button", { name: "Open settings" }).click();
-  await expect(page.getByRole("heading", { name: "Settings", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Agent defaults" })).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Personality" })).toBeVisible();
-  const chatGptProvider = page.locator(".provider-row").filter({ hasText: "ChatGPT Plus/Pro" });
-  const geminiProvider = page.locator(".provider-row").filter({ hasText: "Google Gemini CLI" });
-  const copilotProvider = page.locator(".provider-row").filter({ hasText: "GitHub Copilot" });
-  await expect(chatGptProvider.locator(".provider-state")).toHaveText("Available");
-  await expect(geminiProvider.getByRole("button", { name: "Sign in to Google Gemini CLI" })).toBeVisible();
-  await expect(copilotProvider.locator(".provider-state")).toHaveText("Unavailable");
-  await chatGptProvider.getByRole("button", { name: "Sign in to ChatGPT Plus/Pro" }).click();
-  const authInput = page.getByRole("textbox", { name: "Authentication input" });
-  await expect(authInput).toHaveAttribute("type", "password");
-  await expect(page.locator("body")).not.toContainText("fixture-code");
-  await authInput.fill("fixture-code");
-  await page.getByRole("button", { name: "Submit" }).click();
-  await expect(chatGptProvider.locator(".provider-state")).toHaveText("Connected");
-  await chatGptProvider.getByRole("button", { name: "Sign out of ChatGPT Plus/Pro" }).click();
-  await expect(chatGptProvider.locator(".provider-state")).toHaveText("Available");
-  await page.screenshot({ path: "test-results/settings-1440.png", fullPage: true });
-  await page.getByRole("button", { name: "Back to workspace" }).click();
+	try {
+		const page = await app.firstWindow();
+		const consoleErrors: string[] = [];
+		page.on("console", message => {
+			if (message.type() === "error") consoleErrors.push(message.text());
+		});
+		page.on("pageerror", error => consoleErrors.push(error.message));
+		await page.setViewportSize({ width: 1440, height: 900 });
+		await expect.poll(() => page.evaluate(() => document.styleSheets.length), { timeout: 8_000 }).toBeGreaterThan(0);
+		const shellRgb = await page.evaluate(() => {
+			const canvas = document.createElement("canvas");
+			const context = canvas.getContext("2d");
+			if (!context) throw new Error("Canvas is unavailable");
+			context.fillStyle = getComputedStyle(document.body).backgroundColor;
+			context.fillRect(0, 0, 1, 1);
+			return [...context.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+		});
+		expect(Math.max(...shellRgb)).toBeLessThan(80);
 
-  await expect(page.getByRole("tab", { name: /Work/ })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("heading", { name: "Work", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Resume" }).click();
-  await expect(page.getByText("Fixture ready.")).toBeVisible();
-  await page.getByRole("button", { name: "Open settings" }).click();
-  const modelSearch = page.getByRole("searchbox", { name: "Search models" });
-  await expect(modelSearch).toBeEnabled();
-  const modelProviderFilter = page.getByRole("combobox", { name: "Filter models by provider" });
-  await modelProviderFilter.selectOption("alternate");
-  await expect(page.getByRole("button", { name: "Use Compact Fixture from alternate" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Use Fast Fixture from fixture" })).toHaveCount(0);
-  await modelProviderFilter.selectOption("fixture");
-  await modelSearch.fill("Fast Fixture");
-  const fastModel = page.getByRole("button", { name: "Use Fast Fixture from fixture" });
-  await expect(fastModel).toBeVisible();
-  await fastModel.click();
-  await expect(page.locator(".settings-global-status")).toContainText("Model changed to Fast Fixture.");
-  await expect(fastModel).toHaveAttribute("aria-pressed", "true");
-  await modelProviderFilter.selectOption("openrouter");
-  await modelSearch.fill("");
-  const openRouterModel = page.locator(".model-accordion").filter({ hasText: "GPT-4o via OpenRouter" });
-  const openRouterAccordion = openRouterModel.getByRole("button", { name: /GPT-4o via OpenRouter/ });
-  await expect(openRouterModel.locator('[title="Text input"]')).toBeVisible();
-  await expect(openRouterModel.locator('[title="Image input"]')).toBeVisible();
-  await expect(openRouterModel.locator('[title="Reasoning"]')).toBeVisible();
-  await openRouterAccordion.click();
-  const azureRoute = page.getByRole("checkbox", { name: "Allow Azure for GPT-4o via OpenRouter" });
-  const openAiRoute = page.getByRole("checkbox", { name: "Allow OpenAI for GPT-4o via OpenRouter" });
-  await expect(azureRoute).toBeChecked();
-  await azureRoute.uncheck();
-  await expect(page.locator(".settings-global-status")).toContainText("Azure excluded for GPT-4o via OpenRouter.");
-  await expect(azureRoute).not.toBeChecked();
-  await expect(openAiRoute).toBeDisabled();
-  await page.screenshot({ path: "test-results/openrouter-routing-1440.png", fullPage: true });
-  await modelProviderFilter.selectOption("fixture");
-  await modelSearch.fill("Fast Fixture");
-  await page.getByRole("combobox", { name: "Settings thinking level" }).selectOption("high");
-  await expect(page.locator(".settings-global-status")).toContainText("Thinking level updated.");
-  await page.getByRole("checkbox", { name: "Fast mode" }).check();
-  await expect(page.locator(".settings-global-status")).toContainText("Fast mode enabled.");
-  await page.getByRole("combobox", { name: "Steering delivery" }).selectOption("one-at-a-time");
-  await expect(page.locator(".settings-global-status")).toContainText("Steering delivery updated.");
-  await page.getByRole("combobox", { name: "Follow-up delivery" }).selectOption("one-at-a-time");
-  await expect(page.locator(".settings-global-status")).toContainText("Follow-up delivery updated.");
-  await page.getByRole("combobox", { name: "Interrupt behavior" }).selectOption("wait");
-  await expect(page.locator(".settings-global-status")).toContainText("Interrupt behavior updated.");
-  await page.getByRole("checkbox", { name: "Automatic compaction" }).uncheck();
-  await expect(page.locator(".settings-global-status")).toContainText("Automatic compaction disabled.");
-  await page.getByRole("checkbox", { name: "Automatic retry" }).uncheck();
-  await expect(page.locator(".settings-global-status")).toContainText("Automatic retry disabled.");
-  await page.getByRole("tab", { name: "Model defaults" }).click();
-  await page.getByRole("combobox", { name: "Personality" }).selectOption("pragmatic");
-  await expect(page.locator(".settings-global-status")).toContainText("Personality updated.");
-  await page.getByRole("tab", { name: "Tools" }).click();
-  await page.getByRole("checkbox", { name: "Generate image" }).uncheck();
-  await expect(page.locator(".settings-global-status")).toContainText("Starts with the next session.");
-  await page.getByRole("combobox", { name: "Inspect image" }).selectOption("on");
-  await expect(page.locator(".settings-global-status")).toContainText("Inspect image updated.");
-  await page.getByRole("tab", { name: "Delegation" }).click();
-  await page.getByRole("combobox", { name: "Maximum collaborators" }).selectOption("16");
-  await expect(page.locator(".settings-global-status")).toContainText("Maximum collaborators updated.");
-  const refreshSettings = page.getByRole("button", { name: "Refresh" });
-  await refreshSettings.click();
-  await expect(refreshSettings).toBeEnabled();
-  await expect(fastModel).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("combobox", { name: "Settings thinking level" })).toHaveValue("high");
-  await expect(page.getByRole("checkbox", { name: "Fast mode" })).toBeChecked();
-  await expect(page.getByRole("combobox", { name: "Steering delivery" })).toHaveValue("one-at-a-time");
-  await expect(page.getByRole("combobox", { name: "Follow-up delivery" })).toHaveValue("one-at-a-time");
-  await expect(page.getByRole("combobox", { name: "Interrupt behavior" })).toHaveValue("wait");
-  await expect(page.getByRole("checkbox", { name: "Automatic compaction" })).not.toBeChecked();
-  await expect(page.getByRole("checkbox", { name: "Automatic retry" })).not.toBeChecked();
-  await expect(page.getByRole("combobox", { name: "Maximum collaborators" })).toHaveValue("16");
-  await page.getByRole("tab", { name: "Model defaults" }).click();
-  await expect(page.getByRole("combobox", { name: "Personality" })).toHaveValue("pragmatic");
-  await page.getByRole("tab", { name: "Tools" }).click();
-  await expect(page.getByRole("checkbox", { name: "Generate image" })).not.toBeChecked();
-  await expect(page.getByRole("combobox", { name: "Inspect image" })).toHaveValue("on");
-  await page.screenshot({ path: "test-results/settings-runtime-1440.png", fullPage: true });
-  await page.getByRole("button", { name: "Back to workspace" }).click();
+		await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveAttribute("aria-current", "page");
+		let activeStage = page.locator(".tab-stage.is-active");
+		await expect(activeStage.locator(".workspace-pane")).toHaveCount(1);
+		await expect(activeStage.locator(".terminal-surface")).toHaveCount(1);
+		await expect(activeStage.getByRole("textbox", { name: "Address" })).toHaveCount(0);
+		await expect.poll(async () => {
+			const failureView = activeStage.locator(".terminal-failure");
+			const failure = await failureView.count() > 0 ? await failureView.textContent() : null;
+			return failure ? `Error: ${failure}` : await activeStage.locator(".pane-detail").textContent();
+		}).toBe("Terminal");
+		await expect(page.getByText("WASM VT", { exact: false })).toBeVisible();
 
-  const composer = page.getByRole("combobox", { name: "Message OMP" });
-  await composer.fill("/");
-  const commandList = page.getByRole("listbox", { name: "Slash commands" });
-  await expect(commandList).toBeVisible();
-  await expect(commandList.getByRole("option")).toHaveCount(18);
-  await page.screenshot({ path: "test-results/commands-1440.png", fullPage: true });
-  expect(await commandList.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
-  await commandList.hover();
-  await page.mouse.wheel(0, 600);
-  await expect.poll(() => commandList.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
-  await page.mouse.move(0, 0);
-  await composer.focus();
-  const selectedCommandBeforeArrow = await composer.getAttribute("aria-activedescendant");
-  await composer.press("ArrowDown");
-  await expect.poll(() => composer.getAttribute("aria-activedescendant")).not.toBe(selectedCommandBeforeArrow);
-  await composer.press("Escape");
-  await expect(commandList).toBeHidden();
+		await page.getByRole("button", { name: "Maximize Branchlight" }).click();
+		await expect(page.getByRole("button", { name: "Restore Branchlight" })).toBeVisible();
+		await page.getByRole("button", { name: "Restore Branchlight" }).click();
 
-  await composer.fill("/cmp");
-  await expect(page.getByRole("option", { name: /\/compact/ })).toBeVisible();
-  await expect(page.getByRole("option", { name: /\/status/ })).toHaveCount(0);
-  await composer.press("Enter");
-  await expect(composer).toHaveValue("/compact ");
-  await expect(composer).toBeFocused();
-  await expect(commandList).toBeHidden();
+		await page.getByRole("button", { name: "Split terminal below" }).click();
+		await expect(activeStage.locator(".workspace-pane")).toHaveCount(2);
+		await expect(activeStage.locator(".terminal-surface")).toHaveCount(2);
+		await expect(activeStage.getByRole("textbox", { name: "Address" })).toHaveCount(0);
+		await expect(activeStage).toHaveClass(/layout-rows/);
+		await expect(activeStage.locator(".pane-detail")).toHaveText(["Terminal", "Terminal"]);
 
-  await composer.fill("/sta");
-  await expect(page.getByRole("option", { name: /\/status/ })).toBeVisible();
-  await composer.press("Enter");
-  await expect(composer).toHaveValue("/status");
-  await composer.press("Enter");
-  await expect(page.getByText("Fixture status: ready")).toBeVisible();
+		await page.getByRole("button", { name: "OMP Browser", exact: true }).click();
+		activeStage = page.locator(".tab-stage.is-active");
+		await expect(activeStage.locator(".workspace-pane.is-browser")).toHaveCount(1);
+		await expect(activeStage.locator(".terminal-surface")).toHaveCount(0);
+		const firstAddress = activeStage.getByRole("textbox", { name: "Address" });
+		await expect(firstAddress).toHaveCount(1);
+		await firstAddress.fill(browserFixtureUrl);
+		await firstAddress.press("Enter");
+		await expect(firstAddress).toHaveValue(browserFixtureUrl);
 
-  await composer.fill("exercise the fixture");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.locator(".timeline-item.item-user").filter({ hasText: "exercise the fixture" })).toBeVisible();
-  const privilegedInput = page.getByRole("textbox", { name: "Sensitive input" });
-  await expect(privilegedInput).toHaveAttribute("type", "password");
-  await expect(page.locator("body")).not.toContainText("fixture-sudo-password");
-  await privilegedInput.fill("fixture-sudo-password");
-  await page.getByRole("button", { name: "Submit" }).click();
-  await expect(page.getByText("generating image", { exact: true })).toBeVisible();
-  await expect(page.getByText("Fixture completed the requested work.")).toBeVisible();
-  const reasoningSummary = page.getByText("Reasoning · available").last();
-  await expect(reasoningSummary).toBeVisible();
-  await reasoningSummary.click();
-  await expect(page.locator(".reasoning-copy").last()).toContainText("Validating the projected result.");
-  await expect(page.getByText("Generate image")).toBeVisible();
-  await expect(page.locator('img[alt="Generated image 1"]')).toBeVisible();
-  await expect(page.getByText("result.txt").first()).toBeVisible();
-  const resultFileChange = page.getByRole("button", { name: "View git diff for result.txt" }).first();
-  await expect(resultFileChange).toBeVisible();
-  await expect(resultFileChange).toContainText("Wrote");
-  const editedFileChange = page.getByRole("button", { name: "View git diff for src/review.ts" }).first();
-  await expect(editedFileChange).toBeVisible();
-  await expect(editedFileChange).toContainText("Edited");
-  await resultFileChange.click();
-  const resultDiff = page.getByRole("region", { name: "Git diff for result.txt" });
-  await expect(resultDiff).toBeVisible();
-  await expect(resultDiff).toContainText("+Fixture result");
-  await page.screenshot({ path: "test-results/diff-1440.png", fullPage: true });
-  await page.getByRole("button", { name: "Close git diff" }).click();
-  await page.screenshot({ path: "test-results/work-1440.png", fullPage: true });
-  const timelineScroller = page.locator(".timeline-scroll");
-  await composer.fill("seed scroll fixture");
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByText("Scroll fixture entry 18")).toBeVisible();
-  const statusEntryCount = await page.getByText("Fixture status: ready", { exact: true }).count();
-  const scrollRange = await timelineScroller.evaluate(element => element.scrollHeight - element.clientHeight);
-  expect(scrollRange).toBeGreaterThan(100);
-  await timelineScroller.evaluate((element, top) => { element.scrollTop = top; }, Math.floor(scrollRange / 2));
-  await expect.poll(() => timelineScroller.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
-  const anchoredScrollTop = await timelineScroller.evaluate(element => element.scrollTop);
-  await page.evaluate(() => window.branchlight.prompt("work-session-0001", "/status"));
-  await expect(page.getByText("Fixture status: ready", { exact: true })).toHaveCount(statusEntryCount + 1);
-  const preservedScrollTop = await timelineScroller.evaluate(element => element.scrollTop);
-  expect(preservedScrollTop).toBe(anchoredScrollTop);
-  expect(preservedScrollTop).toBeGreaterThan(0);
+		await page.getByRole("button", { name: "OMP Browser", exact: true }).dblclick();
+		const renameInput = page.getByRole("textbox", { name: "Tab name" });
+		await renameInput.fill("Research Docs");
+		await renameInput.press("Enter");
+		await expect(page.getByRole("button", { name: "Research Docs", exact: true })).toHaveAttribute("aria-current", "page");
 
-  await page.getByRole("button", { name: "About Branchlight" }).click();
-  await expect(page.getByRole("dialog", { name: "Branchlight" })).toContainText("Solar Icons by 480 Design");
-  await page.getByRole("dialog", { name: "Branchlight" }).getByRole("button", { name: "Close" }).click();
+		await page.getByRole("button", { name: "Split browser right" }).click();
+		await expect(activeStage.locator(".workspace-pane.is-browser")).toHaveCount(2);
+		await expect(activeStage.getByRole("textbox", { name: "Address" })).toHaveCount(2);
+		await expect(activeStage.locator(".terminal-surface")).toHaveCount(0);
+		const secondAddress = activeStage.getByRole("textbox", { name: "Address" }).nth(1);
+		await secondAddress.fill(browserFixtureUrl);
+		await secondAddress.press("Enter");
+		await expect(secondAddress).toHaveValue(browserFixtureUrl);
 
-  await page.getByRole("tab", { name: /Code/ }).click();
-  await expect(page.getByRole("heading", { name: "Code" })).toBeVisible();
-  await page.getByRole("button", { name: "Resume" }).click();
-  await expect(page.getByText("Technical record")).toBeVisible();
-  await page.getByRole("combobox", { name: "Message OMP" }).fill("inspect the fixture");
-  await page.getByRole("button", { name: "Send" }).click();
-  const codePrivilegedInput = page.getByRole("textbox", { name: "Sensitive input" });
-  await expect(codePrivilegedInput).toHaveAttribute("type", "password");
-  await codePrivilegedInput.fill("fixture-code-sudo-password");
-  await page.getByRole("button", { name: "Submit" }).click();
-  await expect(page.getByText("Technical details").first()).toBeVisible();
-  await page.getByRole("button", { name: /Verifier/ }).click();
-  await expect(page.getByText("Fixture collaborator transcript.")).toBeVisible();
-  await page.screenshot({ path: "test-results/code-1440.png", fullPage: true });
-  await page.getByRole("tab", { name: /Work/ }).click();
-  await expect(page.getByText("Scroll fixture entry 18")).toBeVisible();
-  const reopenedTimelineScroller = page.locator(".timeline-scroll");
-  await expect.poll(() => reopenedTimelineScroller.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
-  await page.getByRole("tab", { name: /Code/ }).click();
-  await expect(page.getByText("Technical record")).toBeVisible();
-  await page.setViewportSize({ width: 960, height: 640 });
-  await expect(page.getByRole("combobox", { name: "Message OMP" })).toBeVisible();
-  const compactTabs = await page.locator(".mode-tabs").boundingBox();
-  expect(compactTabs).not.toBeNull();
-  expect(Math.abs((compactTabs?.x ?? 0) + (compactTabs?.width ?? 0) / 2 - 480)).toBeLessThan(4);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth && document.body.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.getByRole("button", { name: "About Branchlight" }).focus();
-  await page.keyboard.press("Enter");
-  await expect(page.getByRole("dialog", { name: "Branchlight" })).toBeVisible();
-  await page.getByRole("dialog", { name: "Branchlight" }).getByRole("button", { name: "Close" }).focus();
-  await page.keyboard.press("Enter");
-  await expect(page.getByRole("button", { name: "About Branchlight" })).toBeFocused();
-  await page.screenshot({ path: "test-results/branchlight-960.png", fullPage: true });
+		const cdpPort = await app.evaluate(({ app: electronApp }) =>
+			Number.parseInt(electronApp.commandLine.getSwitchValue("remote-debugging-port"), 10),
+		);
+		expect(cdpPort).toBeGreaterThan(0);
+		const cdpUrl = `http://127.0.0.1:${cdpPort}`;
+		const cdpBrowser = await connect({ browserURL: cdpUrl });
+		try {
+			await expect.poll(async () => {
+				const pages = await cdpBrowser.pages();
+				return await Promise.all(pages.map(candidate => candidate.title()));
+			}).toEqual(expect.arrayContaining([
+				expect.stringContaining("Branchlight · Research Docs / 1 · Branchlight Browser Fixture"),
+				expect.stringContaining("Branchlight · Research Docs / 2 · Branchlight Browser Fixture"),
+			]));
+			const pages = await cdpBrowser.pages();
+			const namedPage = (await Promise.all(pages.map(async candidate => ({ candidate, title: await candidate.title() }))))
+				.find(item => item.title.includes("Research Docs / 2"))?.candidate;
+			expect(namedPage).toBeDefined();
+			await namedPage?.click("#fixture-action");
+			await expect.poll(() => namedPage?.$eval("#fixture-output", node => node.textContent)).toBe("Connected");
+		} finally {
+			await cdpBrowser.disconnect();
+		}
+		await page.screenshot({ path: "test-results/browser-split-1440.png", fullPage: true });
 
-  const axe = await new AxeBuilder({ page }).setLegacyMode(true).analyze();
-  expect(axe.violations.filter(violation => violation.impact === "critical" || violation.impact === "serious")).toEqual([]);
-  expect(consoleErrors).toEqual([]);
-  await app.close();
+
+		await page.getByRole("button", { name: "Terminal", exact: true }).click();
+		activeStage = page.locator(".tab-stage.is-active");
+		await expect(activeStage.locator(".terminal-surface")).toHaveCount(2);
+		await expect(activeStage.locator(".browser-surface")).toHaveCount(0);
+		await expect(activeStage.getByRole("textbox", { name: "Address" })).toHaveCount(0);
+
+		await page.getByRole("button", { name: "New tab" }).click();
+		await expect(page.getByRole("menuitem", { name: /Browser tab/ })).toBeVisible();
+		await page.getByRole("menuitem", { name: /Terminal tab/ }).click();
+		await expect(page.getByRole("button", { name: "Terminal 2", exact: true })).toHaveAttribute("aria-current", "page");
+		activeStage = page.locator(".tab-stage.is-active");
+		await expect(activeStage.locator(".terminal-surface")).toHaveCount(1);
+		await expect(activeStage.getByRole("textbox", { name: "Address" })).toHaveCount(0);
+
+		await page.setViewportSize({ width: 960, height: 640 });
+		expect(await page.evaluate(() =>
+			document.documentElement.scrollWidth <= window.innerWidth && document.body.scrollWidth <= window.innerWidth,
+		)).toBe(true);
+		await page.screenshot({ path: "test-results/workspace-960.png", fullPage: true });
+
+		const axe = await new AxeBuilder({ page }).setLegacyMode(true).analyze();
+		expect(axe.violations.filter(violation => violation.impact === "critical" || violation.impact === "serious")).toEqual([]);
+		expect(consoleErrors).toEqual([]);
+	} finally {
+		await app.close();
+	}
 });

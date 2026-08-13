@@ -89,7 +89,7 @@ export interface BrowserToolDetails {
 	meta?: OutputMeta;
 }
 
-function resolveBrowserKind(params: BrowserParams, session: ToolSession): BrowserKind {
+export function resolveBrowserKind(params: BrowserParams, session: ToolSession): BrowserKind {
 	const app = params.app;
 	if (app?.cdp_url) {
 		return { kind: "connected", cdpUrl: app.cdp_url.replace(/\/+$/, "") };
@@ -104,6 +104,10 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 	if (app?.relay) {
 		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl });
 		if (relayKind) return relayKind;
+	}
+	const inheritedCdpUrl = process.env.PI_BROWSER_CDP_URL?.trim();
+	if (inheritedCdpUrl) {
+		return { kind: "connected", cdpUrl: inheritedCdpUrl.replace(/\/+$/, "") };
 	}
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback
@@ -317,7 +321,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 									deviceScaleFactor: params.viewport.scale,
 								}
 							: undefined,
-						target: params.app?.target,
+						target: resolveBranchlightBrowserTarget(name, params.app?.target),
 						timeoutMs,
 						dialogs: params.dialogs,
 						signal: openSignal,
@@ -422,6 +426,9 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		}
 		return toolResult(details).content(content).done();
 	}
+}
+export function resolveBranchlightBrowserTarget(name: string, target?: string): string | undefined {
+	return target ?? (process.env.BRANCHLIGHT_TERMINAL === "1" && name !== DEFAULT_TAB_NAME ? name : undefined);
 }
 
 /** Persist over-cap browser run output as a session artifact; mirrors the bash minimizer's save path. */

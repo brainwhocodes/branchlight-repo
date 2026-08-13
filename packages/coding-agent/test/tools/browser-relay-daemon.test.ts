@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { findFreeTcpPort } from "@oh-my-pi/pi-utils/net";
 import { createDaemonBrokerClient } from "../../src/launch/client";
-import { findFreeCdpPort } from "../../src/tools/browser/attach";
 import { probeRelayServer } from "../../src/tools/browser/relay/daemon";
 
 async function waitUntil(condition: () => boolean | Promise<boolean>, timeoutMs: number): Promise<boolean> {
@@ -23,7 +23,7 @@ describe("browser relay daemon", () => {
 		const firstMarker = path.join(home, "first-ready");
 		const secondMarker = path.join(home, "second-ready");
 		const globalRuntimeDir = path.join(home, ".omp", "run", "daemons", "global", "browser-relay");
-		const cdpUrl = `http://127.0.0.1:${await findFreeCdpPort()}`;
+		const cdpUrl = `http://127.0.0.1:${await findFreeTcpPort()}`;
 		const scriptPath = path.join(home, "consumer.ts");
 		await Promise.all([fs.mkdir(firstProject), fs.mkdir(secondProject)]);
 		await Bun.write(

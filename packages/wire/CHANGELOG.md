@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the JSONL request and event contracts for Branchlight's desktop PTY worker.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

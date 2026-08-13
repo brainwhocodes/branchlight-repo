@@ -1,15 +1,19 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import { findFreeTcpPort } from "@oh-my-pi/pi-utils/net";
 import { app, BrowserWindow, ipcMain, net, protocol, session } from "electron";
 import { DesktopHost } from "./desktop-host";
 import { safeExternalUrl } from "./guards";
+import { WorkspaceHost } from "./workspace-host";
 
 const DEV_SERVER = typeof MAIN_WINDOW_VITE_DEV_SERVER_URL === "string" ? MAIN_WINDOW_VITE_DEV_SERVER_URL : undefined;
 const CONTENT_SECURITY_POLICY =
-	"default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+	"default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 let mainWindow: BrowserWindow | undefined;
 let host: DesktopHost | undefined;
+let workspace: WorkspaceHost | undefined;
 let quitting = false;
 
 protocol.registerSchemesAsPrivileged([
@@ -25,9 +29,9 @@ if (!gotLock) {
 		if (mainWindow.isMinimized()) mainWindow.restore();
 		mainWindow.focus();
 	});
-	void app
-		.whenReady()
-		.then(async () => {
+	void prepareBrowserControl()
+		.then(async cdpUrl => {
+			await app.whenReady();
 			app.setName("Branchlight");
 			app.setAppUserModelId("labs.branchlight.desktop");
 			registerProtocol();
@@ -36,7 +40,8 @@ if (!gotLock) {
 			await host.load();
 			mainWindow = createWindow();
 			host.setWindow(mainWindow);
-			registerIpc(host);
+			workspace = new WorkspaceHost(mainWindow, cdpUrl);
+			registerIpc(host, workspace);
 			if (host.bootstrap().warning)
 				mainWindow.webContents.once("did-finish-load", () =>
 					mainWindow?.webContents.send("branchlight:event", {
@@ -47,21 +52,30 @@ if (!gotLock) {
 				);
 			await loadRenderer(mainWindow);
 		})
-		.catch(() => {
+		.catch(error => {
+			logger.error("Branchlight startup failed", { error: error instanceof Error ? error.message : String(error) });
 			app.quit();
 		});
 	app.on("before-quit", event => {
-		if (quitting || !host) return;
+		if (quitting || (!host && !workspace)) return;
 		event.preventDefault();
 		quitting = true;
-		void host
-			.stopAll()
+		void Promise.all([host?.stopAll(), workspace?.stop()])
 			.then(() => host?.close())
 			.finally(() => app.quit());
 	});
 	app.on("window-all-closed", () => {
 		if (process.platform !== "darwin") app.quit();
 	});
+}
+
+async function prepareBrowserControl(): Promise<string> {
+	const configured = Number.parseInt(process.env.BRANCHLIGHT_CDP_PORT ?? "", 10);
+	const port =
+		Number.isSafeInteger(configured) && configured > 0 && configured <= 65_535 ? configured : await findFreeTcpPort();
+	app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
+	app.commandLine.appendSwitch("remote-debugging-port", String(port));
+	return `http://127.0.0.1:${port}`;
 }
 
 function createWindow(): BrowserWindow {
@@ -72,7 +86,7 @@ function createWindow(): BrowserWindow {
 		minHeight: 640,
 		title: "Branchlight",
 		frame: false,
-		backgroundColor: "#f5f8fb",
+		backgroundColor: "#242321",
 		webPreferences: {
 			preload: path.join(__dirname, "preload.js"),
 			contextIsolation: true,
@@ -127,7 +141,7 @@ async function loadRenderer(window: BrowserWindow): Promise<void> {
 	else await window.loadURL("branchlight://app/index.html");
 }
 
-function registerIpc(desktopHost: DesktopHost): void {
+function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost): void {
 	ipcMain.handle("branchlight:bootstrap", event => {
 		assertTrustedSender(event);
 		return desktopHost.bootstrap();
@@ -266,6 +280,50 @@ function registerIpc(desktopHost: DesktopHost): void {
 	ipcMain.handle("branchlight:open-external", (event, url: unknown) => {
 		assertTrustedSender(event);
 		return desktopHost.openExternal(url);
+	});
+	ipcMain.handle("branchlight:browser-create", (event, id: unknown, url: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.createBrowser(id, url);
+	});
+	ipcMain.handle("branchlight:browser-name", (event, id: unknown, name: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.nameBrowser(id, name);
+	});
+	ipcMain.handle("branchlight:browser-navigate", (event, id: unknown, url: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.navigateBrowser(id, url);
+	});
+	ipcMain.handle("branchlight:browser-control", (event, id: unknown, action: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.controlBrowser(id, action);
+	});
+	ipcMain.handle("branchlight:browser-bounds", (event, id: unknown, bounds: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.setBrowserBounds(id, bounds);
+	});
+	ipcMain.handle("branchlight:browser-visible", (event, ids: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.setVisibleBrowsers(ids);
+	});
+	ipcMain.handle("branchlight:browser-close", (event, id: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.closeBrowser(id);
+	});
+	ipcMain.handle("branchlight:terminal-create", (event, id: unknown, cols: unknown, rows: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.createTerminal(id, cols, rows);
+	});
+	ipcMain.handle("branchlight:terminal-write", (event, id: unknown, data: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.writeTerminal(id, data);
+	});
+	ipcMain.handle("branchlight:terminal-resize", (event, id: unknown, cols: unknown, rows: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.resizeTerminal(id, cols, rows);
+	});
+	ipcMain.handle("branchlight:terminal-close", (event, id: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.closeTerminal(id);
 	});
 	ipcMain.handle("branchlight:window-minimize", event => {
 		assertTrustedSender(event);

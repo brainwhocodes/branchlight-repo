@@ -21,6 +21,7 @@ Drives real Chromium tab; full puppeteer access via JS.
 
 - `app.path` → NEVER tamper with a real desktop app (no stealth patches).
 - `app.relay: true` → drive the user's own Chrome tabs via the omp browser relay (auto-started; needs the OMP Browser Relay extension installed). `app.target` picks a tab by URL/title substring; without it the visible tab is adopted without stealing focus.
+- Branchlight terminal? Named workspace browser tabs are pre-connected. Set browser `name` to the workspace tab name (or use `app.target` explicitly); a mismatch lists available names.
 - Selectors: CSS + puppeteer `aria/…`, `text/…`, `xpath/…`, `pierce/…`. Playwright-only pseudos (`:has-text()`, `:visible`) are REJECTED.
 </instruction>
 

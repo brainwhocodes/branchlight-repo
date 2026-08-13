@@ -2,12 +2,17 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced the Work and Code chat surfaces with a tabbed terminal and browser workspace.
+
 ### Added
 
 - Added the ChatGPT OAuth settings flow and masked extension-input prompts for credentials that stay outside desktop transcripts.
 - Added searchable model selection, every OAuth login provider reported by OMP, automatic-retry control, and categorized agent defaults to the desktop settings workspace.
 - Added inline write/edit artifacts with a lazy working-tree Git diff inspector that keeps the conversation visible.
 - Added OpenRouter model accordions with per-model upstream-provider exclusions and Solar capability icons for text, image, and reasoning support.
+- Added homogeneous terminal and browser splits, a Ghostty WebAssembly terminal renderer backed by Bun's native PTY worker, and named loopback CDP browser targets for OMP.
 
 ### Changed
 
@@ -15,6 +20,7 @@
 - Limited native image generation to OpenAI API and ChatGPT/Codex subscription providers.
 - Changed the chat composer to expose all RPC slash commands in a keyboard-accessible, scrollable fuzzy-search menu while command discovery and prompt acknowledgement stay asynchronous.
 - Changed desktop session settings to expose a searchable model catalog plus thinking, fast mode, steering, follow-up, interrupt, automatic-compaction, and automatic-retry controls with explicit loading, stopped-session, success, and failure states.
+- Scoped browser navigation controls to browser panes so terminal tabs never render an address bar.
 
 ### Fixed
 
@@ -24,3 +30,7 @@
 - Fixed streamed reasoning updates being dropped from the live desktop timeline or duplicated in restored transcripts.
 - Fixed incremental transcript updates rebuilding the timeline and moving readers away from their current scroll position.
 - Fixed restored sessions opening above their newest message instead of at the end of the transcript.
+
+### Removed
+
+- Removed the chat composer, transcript timeline, and Work/Code mode switch from the active desktop renderer.
