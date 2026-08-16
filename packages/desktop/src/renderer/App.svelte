@@ -322,11 +322,12 @@
 	</header>
 
 	<div class="tab-strip">
-		<nav class="workspace-tabs" aria-label="Workspace tabs">
+		<nav class="workspace-tabs" role="tablist" aria-label="Workspace tabs">
 			<button
 				type="button"
 				class="workspace-tab chat-tab-button"
 				class:is-active={activeTabId === CHAT_TAB_ID}
+				role="tab"
 				aria-selected={activeTabId === CHAT_TAB_ID}
 				onclick={activateChat}
 			>
@@ -379,7 +380,7 @@
 				<div class={`browser-pane-grid ${layoutClass(tab)}`} style={tab.panes.length === 2 && tab.layout === "columns" ? `grid-template-columns: ${tab.ratio}% ${100 - tab.ratio}%` : tab.panes.length === 2 && tab.layout === "rows" ? `grid-template-rows: ${tab.ratio}% ${100 - tab.ratio}%` : ""}>
 					{#each tab.panes as pane (pane.id)}
 						{@const state = browserStates.get(pane.id)}
-						<div class="browser-pane" class:is-focused={tab.activePaneId === pane.id} onpointerdown={() => activatePane(tab, pane.id)}>
+						<div class="browser-pane" class:is-focused={tab.activePaneId === pane.id} role="group" aria-label="Browser pane" onpointerdown={() => activatePane(tab, pane.id)}>
 							<header class="browser-toolbar">
 								<div class="browser-controls">
 									<button type="button" aria-label="Back" disabled={!state?.canGoBack} onclick={() => controlBrowser(pane.id, "back")}><AltArrowLeft size={16} /></button>
