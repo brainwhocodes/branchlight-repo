@@ -26,11 +26,9 @@ jobs:
 
           omp_path = Path("packages/desktop/src/renderer/OmpChat.svelte")
           omp = omp_path.read_text()
-
           controls_start = omp.index("  let windowMaximized = false;")
           controls_end = omp.index("  function formatMessage", controls_start)
           omp = omp[:controls_start] + omp[controls_end:]
-
           head_start = omp.index("<svelte:head>")
           topbar_start = omp.index('  <header class="topbar">', head_start)
           omp = omp[:head_start] + '<div class="app-shell">\n' + omp[topbar_start:]
@@ -38,11 +36,19 @@ jobs:
 
           app_path = Path("packages/desktop/src/renderer/App.svelte")
           app = app_path.read_text()
-          redundant_grid = "\t\tgrid-template-rows: auto minmax(0, 1fr);\n"
-          hidden_window_bar = "\t.chat-stage :global(.window-bar) { display: none; }\n"
-          if redundant_grid not in app or hidden_window_bar not in app:
-              raise SystemExit("Embedded OMP shell cleanup markers were not found")
-          app = app.replace(redundant_grid, "", 1).replace(hidden_window_bar, "", 1)
+          replacements = [
+              (
+                  '<nav class="workspace-tabs" role="tablist" aria-label="Workspace tabs">',
+                  '<div class="workspace-tabs" role="tablist" aria-label="Workspace tabs">',
+              ),
+              ("\t\t</nav>\n\t\t<button type=\"button\" class=\"new-browser\"", "\t\t</div>\n\t\t<button type=\"button\" class=\"new-browser\""),
+              ("\t\tgrid-template-rows: auto minmax(0, 1fr);\n", ""),
+              ("\t.chat-stage :global(.window-bar) { display: none; }\n", ""),
+          ]
+          for old, new in replacements:
+              if old not in app:
+                  raise SystemExit(f"App cleanup marker was not found: {old!r}")
+              app = app.replace(old, new, 1)
           app_path.write_text(app)
 
           semantic_path = Path("packages/desktop/src/renderer/styles/_semantic.scss")
@@ -55,6 +61,34 @@ jobs:
               ".app-shell { height: 100%; min-height: 0; display: flex; flex-direction: column; }",
               1,
           ))
+
+          projection_path = Path("packages/desktop/src/shared/projection.ts")
+          projection_path.write_text(
+              'import type { SessionKind, TimelineFileChange, TimelineItem } from "./contracts";\n\n'
+              'export function projectTimeline(kind: SessionKind, items: readonly TimelineItem[]): TimelineItem[] {\n'
+              '\tif (kind === "code") return [...items];\n'
+              '\treturn items.map(item => {\n'
+              '\t\tif (item.kind !== "tool") return item;\n'
+              '\t\treturn {\n'
+              '\t\t\t...item,\n'
+              '\t\t\targs: undefined,\n'
+              '\t\t\tresult: undefined,\n'
+              '\t\t\tdetail: item.toolName === "generate_image" ? item.detail : undefined,\n'
+              '\t\t};\n'
+              '\t});\n'
+              '}\n\n'
+              'export function changedFiles(items: readonly TimelineItem[]): TimelineFileChange[] {\n'
+              '\tconst latestByPath = new Map<string, TimelineFileChange>();\n'
+              '\tfor (const item of items) {\n'
+              '\t\tif (item.status !== "complete" || item.isError === true || !item.files) continue;\n'
+              '\t\tfor (const file of item.files) {\n'
+              '\t\t\tlatestByPath.delete(file.path);\n'
+              '\t\t\tlatestByPath.set(file.path, file);\n'
+              '\t\t}\n'
+              '\t}\n'
+              '\treturn Array.from(latestByPath.values()).reverse();\n'
+              '}\n'
+          )
 
           main_path = Path("packages/desktop/src/main/main.ts")
           main = main_path.read_text()
@@ -91,6 +125,7 @@ jobs:
 
           bun install --frozen-lockfile
           bun --cwd=packages/desktop run check
+          bun --cwd=packages/natives run build
           bun --cwd=packages/desktop run test
           bun --cwd=packages/desktop run backend:build
 
@@ -102,6 +137,7 @@ jobs:
             packages/desktop/src/renderer/App.svelte \
             packages/desktop/src/renderer/OmpChat.svelte \
             packages/desktop/src/renderer/styles/_semantic.scss \
+            packages/desktop/src/shared/projection.ts \
             .github/workflows/omp-chat-finalize.yml
           git commit -m "fix(desktop): embed OMP chat cleanly"
           git push origin HEAD:feat/omp-chat-workspace
