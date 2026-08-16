@@ -146,7 +146,7 @@ jobs:
             "$PWD/packages/natives/native/pi_natives.linux-x64-baseline.node" \
             "$PWD/packages/natives/native/pi_natives.linux-x64-modern.node"
 
-          bun --cwd=packages/desktop run test
+          (cd packages/desktop && bunx --bun vitest run)
           bun --cwd=packages/desktop run backend:build
 
           rm .github/workflows/omp-chat-finalize.yml
