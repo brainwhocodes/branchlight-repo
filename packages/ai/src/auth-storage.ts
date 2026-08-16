@@ -874,6 +874,21 @@ export interface OAuthAccountIdentity {
 	orgName?: string;
 }
 
+export interface OAuthAccountSelectionTarget {
+	identityHash: string;
+	credentialId?: number;
+}
+
+export interface OAuthAccountSelectionPolicy {
+	selections: Readonly<Record<string, OAuthAccountSelectionTarget>>;
+	allowSiblingFailover: boolean;
+}
+
+export interface OAuthAccountSelectionState extends OAuthAccountSelectionTarget {
+	available: boolean;
+	allowSiblingFailover: boolean;
+}
+
 export type OAuthAccessResolution = ({ ok: true } & OAuthAccess) | ({ ok: false } & OAuthAccessFailure);
 
 /**
@@ -1249,6 +1264,8 @@ export class AuthStorage {
 	#data: Map<string, StoredCredential[]> = new Map();
 	#runtimeOverrides: Map<string, string> = new Map();
 	#configOverrides: Map<string, string> = new Map();
+	/** Runtime-only per-provider OAuth routing intent. Empty selections mean automatic routing. */
+	#oauthAccountSelectionPolicy?: OAuthAccountSelectionPolicy;
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
@@ -2662,12 +2679,65 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Install runtime-only OAuth account routing intent.
+	 *
+	 * The policy is defensively copied. Changing one provider's target (or the
+	 * failover mode that applies to it) invalidates only that provider's session
+	 * stickies; ranking, usage, backoff, and refresh state are intentionally left
+	 * intact.
+	 */
+	setOAuthAccountSelectionPolicy(policy: OAuthAccountSelectionPolicy): void {
+		const previous = this.#oauthAccountSelectionPolicy;
+		const selections = Object.create(null) as Record<string, OAuthAccountSelectionTarget>;
+		for (const [provider, target] of Object.entries(policy.selections)) {
+			selections[provider] = { identityHash: target.identityHash, credentialId: target.credentialId };
+		}
+		const next =
+			Object.keys(selections).length === 0
+				? undefined
+				: { selections, allowSiblingFailover: policy.allowSiblingFailover };
+		const providers = new Set([...Object.keys(previous?.selections ?? {}), ...Object.keys(next?.selections ?? {})]);
+		for (const provider of providers) {
+			const before = previous?.selections[provider];
+			const after = next?.selections[provider];
+			const targetChanged =
+				before?.identityHash !== after?.identityHash || before?.credentialId !== after?.credentialId;
+			const failoverChanged =
+				before !== undefined &&
+				after !== undefined &&
+				previous?.allowSiblingFailover !== next?.allowSiblingFailover;
+			if (!targetChanged && !failoverChanged) continue;
+			this.#sessionLastCredential.delete(provider);
+			this.#clearProviderSessionCredentialCache(provider);
+		}
+		this.#oauthAccountSelectionPolicy = next;
+	}
+
+	/** Return the configured OAuth routing target and its current stored-row availability. */
+	getOAuthAccountSelection(provider: string): OAuthAccountSelectionState | undefined {
+		const target = this.#oauthAccountSelectionPolicy?.selections[provider];
+		if (!target) return undefined;
+		const available =
+			target.credentialId !== undefined &&
+			this.#getStoredCredentials(provider).some(
+				entry => entry.id === target.credentialId && entry.credential.type === "oauth",
+			);
+		return {
+			identityHash: target.identityHash,
+			credentialId: target.credentialId,
+			available,
+			allowSiblingFailover: this.#oauthAccountSelectionPolicy?.allowSiblingFailover ?? false,
+		};
+	}
+
+	/**
 	 * Check if any form of auth is configured for a provider.
 	 * Unlike getApiKey(), this doesn't refresh OAuth tokens.
 	 */
 	hasAuth(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
+		if (this.#oauthAccountSelectionPolicy?.selections[provider]) return true;
 		if (this.#getCredentialsForProvider(provider).length > 0) return true;
 		if (getEnvApiKey(provider)) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
@@ -2688,6 +2758,7 @@ export class AuthStorage {
 	hasNonEnvCredential(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
+		if (this.#oauthAccountSelectionPolicy?.selections[provider]) return true;
 		if (this.#getCredentialsForProvider(provider).length > 0) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
@@ -2740,25 +2811,28 @@ export class AuthStorage {
 		// caller is authenticating with an explicit key, not the broker's OAuth.
 		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) return undefined;
 
-		// Prefer the session-sticky credential when available.
+		// Observed session state wins over global intent: with failover enabled a
+		// sibling may be the account that actually served this session.
 		const sessionPref = this.#getSessionCredential(provider, sessionId);
-		// If the session has been routed to a stored API key, do not inject OAuth account_uuid.
 		if (sessionPref !== undefined && sessionPref.type !== "oauth") return undefined;
+		const stickyCredential = sessionPref?.type === "oauth" ? allCredentials[sessionPref.index] : undefined;
+		if (stickyCredential?.type === "oauth") return stickyCredential;
+
+		// Before a session has served, attribute only an available configured
+		// target. A stale lock must not be misrepresented as an arbitrary sibling.
+		const target = this.#oauthAccountSelectionPolicy?.selections[provider];
+		if (target) {
+			if (target.credentialId === undefined) return undefined;
+			const selected = this.#getStoredCredentials(provider).find(entry => entry.id === target.credentialId);
+			return selected?.credential.type === "oauth" ? selected.credential : undefined;
+		}
 
 		// When no session-sticky credential is recorded yet (first call before any getApiKey,
 		// or all stored credentials are unavailable), the request falls through to the env-key
 		// or fallback-resolver path in getApiKey() — neither is OAuth-authenticated, so
-		// account_uuid injection would misattribute traffic. Only apply this guard when
-		// sessionPref is absent; a recorded OAuth sticky (sessionPref.type === "oauth") must
-		// NOT be blocked even if an env key also happens to exist.
+		// account_uuid injection would misattribute traffic.
 		if (!sessionPref && (getEnvApiKey(provider) || this.#fallbackResolver?.(provider))) return undefined;
-		// Resolve the sticky index against the full credential list — the index is
-		// recorded against the unfiltered provider array (by #recordSessionCredential /
-		// #tryOAuthCredential), not the OAuth-only subset, so dereferencing it into the
-		// filtered array would be off-by-N when any non-OAuth credential precedes the
-		// OAuth ones (e.g. [api_key, oauth_A, oauth_B] stored order).
-		const stickyCredential = sessionPref?.type === "oauth" ? allCredentials[sessionPref.index] : undefined;
-		return stickyCredential?.type === "oauth" ? stickyCredential : oauthCredentials[0];
+		return oauthCredentials[0];
 	}
 
 	/**
@@ -4251,6 +4325,14 @@ export class AuthStorage {
 		sessionId: string | undefined,
 		options?: { credentialId?: number; apiKey?: string },
 	): Promise<{ type: AuthCredential["type"]; index: number; explicit: boolean } | undefined> {
+		const policyTarget = this.#oauthAccountSelectionPolicy?.selections[provider];
+		const strictTarget =
+			policyTarget &&
+			!this.#oauthAccountSelectionPolicy?.allowSiblingFailover &&
+			!this.#runtimeOverrides.has(provider) &&
+			!this.#configOverrides.has(provider)
+				? policyTarget
+				: undefined;
 		const explicit = options?.credentialId !== undefined || options?.apiKey !== undefined;
 		if (explicit) {
 			const latestRows = this.#store.listAuthCredentials(provider);
@@ -4258,6 +4340,14 @@ export class AuthStorage {
 				provider,
 				latestRows.map(row => ({ id: row.id, credential: row.credential })),
 			);
+		}
+		if (strictTarget) {
+			if (strictTarget.credentialId === undefined) return undefined;
+			const stored = this.#getStoredCredentials(provider);
+			const index = stored.findIndex(
+				entry => entry.id === strictTarget.credentialId && entry.credential.type === "oauth",
+			);
+			return index >= 0 ? { type: "oauth", index, explicit: false } : undefined;
 		}
 		if (options?.credentialId !== undefined) {
 			const stored = this.#getStoredCredentials(provider);
@@ -4306,6 +4396,16 @@ export class AuthStorage {
 	): UsageLimitMarkResult {
 		if (targetIndex >= 0) {
 			this.#markCredentialBlocked(provider, routing.providerKey, targetIndex, blockedUntil, routing.blockScope);
+		}
+
+		const configuredTarget = this.#oauthAccountSelectionPolicy?.selections[provider];
+		if (
+			configuredTarget !== undefined &&
+			credentialType === "oauth" &&
+			configuredTarget.credentialId === this.#getStoredCredentials(provider)[targetIndex]?.id &&
+			!this.#oauthAccountSelectionPolicy?.allowSiblingFailover
+		) {
+			return { switched: false };
 		}
 
 		const remainingCredentials = this.#getCredentialsForProvider(provider)
@@ -4648,14 +4748,36 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
-		const credentials = this.#getCredentialsForProvider(provider)
+		const policyTarget = this.#oauthAccountSelectionPolicy?.selections[provider];
+		const allowSiblingFailover =
+			policyTarget !== undefined && (this.#oauthAccountSelectionPolicy?.allowSiblingFailover ?? false);
+		let credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
-			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
+			.filter((entry): entry is OAuthSelection => entry.credential.type === "oauth");
+		const stored = this.#getStoredCredentials(provider);
+		const selectedPolicyIndex =
+			policyTarget?.credentialId === undefined
+				? undefined
+				: credentials.find(entry => stored[entry.index]?.id === policyTarget.credentialId)?.index;
 
-		if (credentials.length === 0) return undefined;
+		if (policyTarget && selectedPolicyIndex === undefined && !allowSiblingFailover) {
+			throw new AIError.OAuthAccountSelectionError(provider, policyTarget.identityHash);
+		}
+		if (policyTarget && selectedPolicyIndex !== undefined && !allowSiblingFailover) {
+			credentials = credentials.filter(entry => entry.index === selectedPolicyIndex);
+		}
+		if (credentials.length === 0) {
+			if (policyTarget) throw new AIError.OAuthAccountSelectionError(provider, policyTarget.identityHash);
+			return undefined;
+		}
 
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
-		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		let order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
+		const selectedPolicyPosition =
+			selectedPolicyIndex === undefined ? -1 : credentials.findIndex(entry => entry.index === selectedPolicyIndex);
+		if (selectedPolicyPosition > 0) {
+			order = [selectedPolicyPosition, ...order.filter(position => position !== selectedPolicyPosition)];
+		}
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy?.blockScope?.(rankingContext);
@@ -4665,7 +4787,8 @@ export class AuthStorage {
 		const hasPlanRequirement = planRequirement !== "none";
 		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
-		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
+		const sessionPreferredIndex =
+			selectedPolicyIndex ?? (sessionCredential?.type === "oauth" ? sessionCredential.index : undefined);
 		const sessionPreferredCredential =
 			sessionPreferredIndex !== undefined
 				? credentials.find(entry => entry.index === sessionPreferredIndex)?.credential
@@ -4681,7 +4804,9 @@ export class AuthStorage {
 		// and sessions idle past {@link ANTHROPIC_SESSION_STICKY_CACHE_WARM_MS} still rank. Legacy
 		// pins predating `lastUsedAtMs` count as warm until the next resolve rewrites the row.
 		const sessionPreferredLastUsedAtMs =
-			sessionCredential?.type === "oauth" ? sessionCredential.lastUsedAtMs : undefined;
+			sessionCredential?.type === "oauth" && sessionCredential.index === sessionPreferredIndex
+				? sessionCredential.lastUsedAtMs
+				: undefined;
 		const sessionPreferredIsWarm =
 			provider !== "anthropic" ||
 			sessionPreferredLastUsedAtMs === undefined ||
@@ -4725,6 +4850,17 @@ export class AuthStorage {
 					.filter((selection): selection is { credential: OAuthCredential; index: number } => Boolean(selection))
 					.map(selection => ({ selection, usage: null, usageChecked: false }));
 
+		// Global intent outranks automatic ranking and any pre-existing session pin.
+		// A blocked or plan-ineligible target still falls through without dispatch
+		// when its pass evaluates it, allowing failover siblings to serve.
+		if (selectedPolicyIndex !== undefined) {
+			const selectedCandidate = candidates.findIndex(candidate => candidate.selection.index === selectedPolicyIndex);
+			if (selectedCandidate > 0) {
+				const [selected] = candidates.splice(selectedCandidate, 1);
+				candidates.unshift(selected);
+			}
+		}
+
 		// On the warm skip path the candidate list follows the round-robin `order`, not the pin, so
 		// hoist the pinned credential to the front to actually reuse it. When ranking ran, the pin is
 		// already a mere tie-break via `rankingOrder`; do not override the ranked result here.
@@ -4748,12 +4884,28 @@ export class AuthStorage {
 			: undefined;
 		await Promise.all(
 			candidates.map(async candidate => {
+				if (
+					policyTarget &&
+					allowSiblingFailover &&
+					selectedPolicyIndex !== undefined &&
+					candidate.selection.index !== selectedPolicyIndex
+				) {
+					return;
+				}
 				const force = forceRefreshIndex !== undefined && candidate.selection.index === forceRefreshIndex;
-				const initialCredentialId = this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
+				const configuredCredentialId = policyTarget?.credentialId;
+				const isConfiguredTarget =
+					configuredCredentialId !== undefined && candidate.selection.index === selectedPolicyIndex;
+				const initialCredentialId = isConfiguredTarget
+					? configuredCredentialId
+					: this.#getStoredCredentials(provider)[candidate.selection.index]?.id;
 				let syncedPeerCredential = false;
 				if (initialCredentialId !== undefined) {
 					const beforeSync = candidate.selection.credential;
-					if (!this.#syncOAuthSelectionFromStore(provider, candidate.selection, initialCredentialId)) return;
+					if (!this.#syncOAuthSelectionFromStore(provider, candidate.selection, initialCredentialId)) {
+						if (isConfiguredTarget) candidate.selection.index = -1;
+						return;
+					}
 					syncedPeerCredential = !authCredentialEquals(beforeSync, candidate.selection.credential);
 				}
 				const hasFreshAccess = Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires;
@@ -4869,6 +5021,7 @@ export class AuthStorage {
 			}
 		}
 
+		if (policyTarget) throw new AIError.OAuthAccountSelectionError(provider, policyTarget.identityHash);
 		return undefined;
 	}
 
@@ -5281,6 +5434,44 @@ export class AuthStorage {
 			return configKey;
 		}
 
+		const policyTarget = this.#oauthAccountSelectionPolicy?.selections[provider];
+		if (policyTarget) {
+			const storedSelections = this.#getStoredOAuthSelections(provider);
+			const selected =
+				policyTarget.credentialId === undefined
+					? undefined
+					: storedSelections.find(selection => selection.credentialId === policyTarget.credentialId);
+			const allowSiblingFailover = this.#oauthAccountSelectionPolicy?.allowSiblingFailover ?? false;
+			if (!selected && !allowSiblingFailover) {
+				throw new AIError.OAuthAccountSelectionError(provider, policyTarget.identityHash);
+			}
+			let candidates = selected
+				? [selected, ...storedSelections.filter(selection => selection.credentialId !== selected.credentialId)]
+				: storedSelections;
+			if (!allowSiblingFailover) {
+				candidates = selected ? [selected] : [];
+			} else {
+				const providerKey = this.#getProviderTypeKey(provider, "oauth");
+				candidates = [
+					...candidates.filter(selection => !this.#isCredentialBlocked(provider, providerKey, selection.index)),
+					...candidates.filter(selection => this.#isCredentialBlocked(provider, providerKey, selection.index)),
+				];
+			}
+			for (const candidate of candidates) {
+				const expiresAt = candidate.credential.expires;
+				if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) continue;
+				if (provider === "github-copilot") {
+					return JSON.stringify({
+						token: candidate.credential.access,
+						enterpriseUrl: candidate.credential.enterpriseUrl,
+						apiEndpoint: candidate.credential.apiEndpoint,
+					});
+				}
+				return candidate.credential.access;
+			}
+			throw new AIError.OAuthAccountSelectionError(provider, policyTarget.identityHash);
+		}
+
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
 		// then a stored static api_key (which may be a stale broker-migrated copy) as a last resort.
 		const oauthSelection = this.#selectCredentialByType(provider, "oauth");
@@ -5505,6 +5696,15 @@ export class AuthStorage {
 		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
 			return [];
 		}
+		return this.listStoredOAuthAccounts(provider, sessionId);
+	}
+
+	/**
+	 * Policy-neutral inventory of durable OAuth rows. Unlike
+	 * {@link AuthStorage.listOAuthAccounts}, explicit API-key overrides do not
+	 * hide stored accounts.
+	 */
+	listStoredOAuthAccounts(provider: string, sessionId?: string): OAuthAccountSummary[] {
 		const sessionCredential = this.#getSessionCredential(provider, sessionId);
 		const activeCredentialId =
 			sessionCredential?.type === "oauth"
@@ -6168,6 +6368,11 @@ export class AuthStorage {
 				!this.#isCredentialBlocked(provider, providerKey, index),
 		);
 		const target = this.#getStoredCredentials(provider)[sessionCredential.index];
+		const configuredTarget = this.#oauthAccountSelectionPolicy?.selections[provider];
+		const strictSelection =
+			target?.credential.type === "oauth" &&
+			configuredTarget?.credentialId === target.id &&
+			!this.#oauthAccountSelectionPolicy?.allowSiblingFailover;
 		const sticky = this.#getSessionCredential(provider, sessionId);
 		if (
 			!sessionCredential.explicit ||
@@ -6194,7 +6399,7 @@ export class AuthStorage {
 					latestRows.map(row => ({ id: row.id, credential: row.credential })),
 				);
 			}
-			return deleted && hasSibling;
+			return !strictSelection && deleted && hasSibling;
 		}
 
 		if (target) {
@@ -6211,7 +6416,7 @@ export class AuthStorage {
 			);
 		}
 
-		return hasSibling;
+		return !strictSelection && hasSibling;
 	}
 
 	/**

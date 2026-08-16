@@ -4,7 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { withOAuthAccess } from "@oh-my-pi/pi-ai/auth-retry";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { isOAuthAccountSelectionError, OAuthAccountSelectionError } from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { withEnv } from "./helpers";
 
 const PROVIDER = "unit-oauth-select";
 
@@ -17,6 +19,31 @@ function oauthCredential(suffix: string) {
 		accountId: `acc-${suffix}`,
 		email: `${suffix}@example.com`,
 	};
+}
+
+function selectionTarget(storage: AuthStorage, suffix: string) {
+	const account = storage.listStoredOAuthAccounts(PROVIDER).find(candidate => candidate.accountId === `acc-${suffix}`);
+	if (!account) throw new Error(`expected stored OAuth account ${suffix}`);
+	return { identityHash: `identity-${suffix}`, credentialId: account.credentialId };
+}
+
+async function expectSelectionError(
+	promise: Promise<unknown>,
+	provider: string,
+	identityHash: string,
+): Promise<OAuthAccountSelectionError> {
+	try {
+		await promise;
+		throw new Error("expected OAuth account selection error");
+	} catch (error) {
+		expect(error).toBeInstanceOf(OAuthAccountSelectionError);
+		expect(isOAuthAccountSelectionError(error)).toBe(true);
+		expect(error).toMatchObject({ provider, identityHash });
+		expect((error as Error).message).toBe(
+			`Locked OAuth account for "${provider}" is unavailable. Choose another account in /settings > Providers > Accounts.`,
+		);
+		return error as OAuthAccountSelectionError;
+	}
 }
 
 describe("AuthStorage OAuth account selection", () => {
@@ -200,5 +227,269 @@ describe("AuthStorage OAuth account selection", () => {
 		expect("accessToken" in result).toBe(false);
 		// Target-only: no sibling credential was refreshed/rotated on the failure path.
 		expect(seen).toEqual(["access-b"]);
+	});
+
+	test("an empty policy leaves automatic routing and session stickiness unchanged", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+
+		const before = await storage.getApiKey(PROVIDER, "automatic-session");
+		if (!before) throw new Error("expected automatic OAuth selection");
+		expect(["access-a", "access-b"]).toContain(before);
+
+		storage.setOAuthAccountSelectionPolicy({ selections: {}, allowSiblingFailover: true });
+
+		expect(storage.getOAuthAccountSelection(PROVIDER)).toBeUndefined();
+		expect(await storage.getApiKey(PROVIDER, "automatic-session")).toBe(before);
+		const another = await storage.getApiKey(PROVIDER, "another-automatic-session");
+		if (!another) throw new Error("expected another automatic OAuth selection");
+		expect(["access-a", "access-b"]).toContain(another);
+	});
+
+	test("strict selection overrides stale stickiness across sessions, switches immediately, and clears to Automatic", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const targetA = selectionTarget(storage, "a");
+		const targetB = selectionTarget(storage, "b");
+
+		expect(storage.pinSessionOAuthAccount(PROVIDER, "stale-sticky", targetA.credentialId)).toBe(true);
+		expect(await storage.getApiKey(PROVIDER, "stale-sticky")).toBe("access-a");
+
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: targetB },
+			allowSiblingFailover: false,
+		});
+		for (const sessionId of ["stale-sticky", "fresh-session", undefined] as const) {
+			expect(await storage.getApiKey(PROVIDER, sessionId)).toBe("access-b");
+		}
+		expect(storage.getOAuthAccountSelection(PROVIDER)).toEqual({
+			...targetB,
+			available: true,
+			allowSiblingFailover: false,
+		});
+
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: targetA },
+			allowSiblingFailover: false,
+		});
+		expect(await storage.getApiKey(PROVIDER, "stale-sticky")).toBe("access-a");
+		expect(await storage.getApiKey(PROVIDER, "fresh-session")).toBe("access-a");
+
+		storage.setOAuthAccountSelectionPolicy({ selections: {}, allowSiblingFailover: false });
+		expect(storage.getOAuthAccountSelection(PROVIDER)).toBeUndefined();
+		expect(storage.pinSessionOAuthAccount(PROVIDER, "stale-sticky", targetB.credentialId)).toBe(true);
+		expect(await storage.getApiKey(PROVIDER, "stale-sticky")).toBe("access-b");
+	});
+
+	test("a stale strict target remains explicit auth intent and throws an actionable typed error", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		const provider = "unit-oauth-select-missing";
+		const identityHash = "missing-identity";
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [provider]: { identityHash, credentialId: 999_999 } },
+			allowSiblingFailover: false,
+		});
+
+		expect(storage.hasAuth(provider)).toBe(true);
+		expect(storage.hasNonEnvCredential(provider)).toBe(true);
+		expect(storage.getOAuthAccountSelection(provider)).toEqual({
+			identityHash,
+			credentialId: 999_999,
+			available: false,
+			allowSiblingFailover: false,
+		});
+		await expectSelectionError(storage.peekApiKey(provider), provider, identityHash);
+		await expectSelectionError(storage.getApiKey(provider, "missing-session"), provider, identityHash);
+		await expectSelectionError(storage.getOAuthAccess(provider, "missing-session"), provider, identityHash);
+	});
+
+	test("runtime and config keys outrank policy while stored-account diagnostics remain policy-neutral", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const staleTarget = { identityHash: "stale-override", credentialId: 999_999 };
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: staleTarget },
+			allowSiblingFailover: false,
+		});
+
+		expect(storage.listStoredOAuthAccounts(PROVIDER).map(account => account.accountId)).toEqual(["acc-a", "acc-b"]);
+		storage.setRuntimeApiKey(PROVIDER, "runtime-key");
+		expect(await storage.getApiKey(PROVIDER)).toBe("runtime-key");
+		expect(await storage.peekApiKey(PROVIDER)).toBe("runtime-key");
+		expect(await storage.getOAuthAccess(PROVIDER)).toBeUndefined();
+		expect(storage.getOAuthAccountIdentity(PROVIDER)).toBeUndefined();
+		expect(storage.listOAuthAccounts(PROVIDER)).toEqual([]);
+		expect(storage.listStoredOAuthAccounts(PROVIDER).map(account => account.accountId)).toEqual(["acc-a", "acc-b"]);
+
+		storage.removeRuntimeApiKey(PROVIDER);
+		storage.setConfigApiKey(PROVIDER, "config-key");
+		expect(await storage.getApiKey(PROVIDER)).toBe("config-key");
+		expect(await storage.peekApiKey(PROVIDER)).toBe("config-key");
+		expect(storage.listStoredOAuthAccounts(PROVIDER)).toHaveLength(2);
+
+		storage.removeConfigApiKey(PROVIDER);
+		await expectSelectionError(
+			storage.getApiKey(PROVIDER, "selected-after-overrides"),
+			PROVIDER,
+			staleTarget.identityHash,
+		);
+	});
+
+	test("strict unavailability cannot fall through to login, env, stored, or fallback keys", async () => {
+		const storage = authStorage;
+		const credentialStore = store;
+		if (!storage || !credentialStore) throw new Error("test setup failed");
+		const provider = "anthropic";
+		await storage.set(provider, [
+			{ ...oauthCredential("a"), accountId: "anthropic-a" },
+			{ type: "api_key", key: "login-key", source: "login" },
+			{ type: "api_key", key: "stored-key" },
+		]);
+		const resolveConfigValue = vi.fn(async (value: string) => value);
+		const guarded = new AuthStorage(credentialStore, { configValueResolver: resolveConfigValue });
+		await guarded.reload();
+		const fallback = vi.fn(() => "fallback-key");
+		guarded.setFallbackResolver(fallback);
+		guarded.setOAuthAccountSelectionPolicy({
+			selections: { [provider]: { identityHash: "stale-anthropic" } },
+			allowSiblingFailover: false,
+		});
+
+		await withEnv({ ANTHROPIC_API_KEY: "env-key", ANTHROPIC_OAUTH_TOKEN: undefined }, async () => {
+			await expectSelectionError(guarded.getApiKey(provider, "lower-precedence"), provider, "stale-anthropic");
+			await expectSelectionError(guarded.peekApiKey(provider), provider, "stale-anthropic");
+		});
+		expect(resolveConfigValue).not.toHaveBeenCalled();
+		expect(fallback).not.toHaveBeenCalled();
+	});
+
+	test("peek and identity use the selected account before any session has served", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const targetB = selectionTarget(storage, "b");
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: targetB },
+			allowSiblingFailover: false,
+		});
+
+		expect(storage.hasAuth(PROVIDER)).toBe(true);
+		expect(storage.hasNonEnvCredential(PROVIDER)).toBe(true);
+		expect(await storage.peekApiKey(PROVIDER)).toBe("access-b");
+		expect(storage.getOAuthAccountId(PROVIDER, "not-served")).toBe("acc-b");
+		expect(storage.getOAuthAccountIdentity(PROVIDER, "not-served")).toMatchObject({
+			accountId: "acc-b",
+			email: "b@example.com",
+		});
+	});
+
+	test("strict attempts only the selected row while failover tries it before ranked siblings", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		const seen: string[] = [];
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			if (!credential) return null;
+			seen.push(credential.access);
+			if (credential.accountId === "acc-b") return null;
+			return { newCredentials: credential, apiKey: credential.access };
+		});
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const targetB = selectionTarget(storage, "b");
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: targetB },
+			allowSiblingFailover: false,
+		});
+
+		await expectSelectionError(storage.getApiKey(PROVIDER, "strict-only"), PROVIDER, targetB.identityHash);
+		expect(seen[0]).toBe("access-b");
+		expect(seen).not.toContain("access-a");
+
+		seen.length = 0;
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: targetB },
+			allowSiblingFailover: true,
+		});
+		expect(await storage.getApiKey(PROVIDER, "failover-session")).toBe("access-a");
+		expect(seen[0]).toBe("access-b");
+		expect(seen).toContain("access-a");
+		expect(storage.getOAuthAccountIdentity(PROVIDER, "failover-session")?.accountId).toBe("acc-a");
+		expect(storage.getOAuthAccountSelection(PROVIDER)?.available).toBe(true);
+	});
+
+	test("a definitively disabled selected row never leaks to a sibling in strict mode", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		const seen: string[] = [];
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			if (!credential) return null;
+			seen.push(credential.access);
+			if (credential.accountId === "acc-b") throw new Error("invalid_grant");
+			return { newCredentials: credential, apiKey: credential.access };
+		});
+		await storage.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const targetB = selectionTarget(storage, "b");
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: targetB },
+			allowSiblingFailover: false,
+		});
+
+		await expectSelectionError(storage.getApiKey(PROVIDER, "disable-selected"), PROVIDER, targetB.identityHash);
+		expect(seen).toEqual(["access-b"]);
+		expect(storage.listStoredOAuthAccounts(PROVIDER).map(account => account.accountId)).toEqual(["acc-a"]);
+		expect(storage.getOAuthAccountSelection(PROVIDER)?.available).toBe(false);
+
+		seen.length = 0;
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: targetB },
+			allowSiblingFailover: true,
+		});
+		expect(await storage.getApiKey(PROVIDER, "disable-selected")).toBe("access-a");
+		expect(seen).toEqual(["access-a"]);
+	});
+
+	test("a selected-row refresh failure blocks strict fallback but permits an existing sibling in failover mode", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		const refreshSeen: string[] = [];
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async (_provider, credential) => {
+			refreshSeen.push(credential.accountId ?? "unknown");
+			if (credential.accountId === "acc-b") throw new Error("temporary refresh service failure");
+			return { ...credential, expires: Date.now() + 60 * 60_000 };
+		});
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		const expiredB = { ...oauthCredential("b"), expires: 0 };
+		await storage.set(PROVIDER, [oauthCredential("a"), expiredB]);
+		const targetB = selectionTarget(storage, "b");
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: targetB },
+			allowSiblingFailover: false,
+		});
+
+		await expectSelectionError(storage.getApiKey(PROVIDER, "refresh-failure"), PROVIDER, targetB.identityHash);
+		expect(refreshSeen.length).toBeGreaterThan(0);
+		expect(refreshSeen.every(accountId => accountId === "acc-b")).toBe(true);
+
+		storage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: targetB },
+			allowSiblingFailover: true,
+		});
+		expect(await storage.getApiKey(PROVIDER, "refresh-failure")).toBe("access-a");
 	});
 });

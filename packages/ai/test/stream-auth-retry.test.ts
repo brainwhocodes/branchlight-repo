@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai";
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { OAuthAccountSelectionError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { classify } from "@oh-my-pi/pi-ai/error/flags";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
@@ -800,6 +800,40 @@ describe("streamSimple resolver auth retry", () => {
 		}
 
 		expect((caught as Error).message).toMatch(/No API key for provider/);
+		expect(attempts).toBe(0);
+	});
+
+	it("preserves an initial OAuth account selection error without dispatching", async () => {
+		let attempts = 0;
+		registerCustomApi(
+			API,
+			() => {
+				attempts += 1;
+				return new AssistantMessageEventStream();
+			},
+			SOURCE_ID,
+		);
+		const selectionError = new OAuthAccountSelectionError("locked-provider", "cd".repeat(32));
+		const stream = streamSimple(model(), context, {
+			apiKey: async () => {
+				throw selectionError;
+			},
+		});
+
+		let caught: unknown;
+		try {
+			for await (const _event of stream) {
+				// drain
+			}
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBe(selectionError);
+		expect(caught).toMatchObject({
+			provider: "locked-provider",
+			identityHash: "cd".repeat(32),
+		});
 		expect(attempts).toBe(0);
 	});
 });

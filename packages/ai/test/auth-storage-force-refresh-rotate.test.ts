@@ -711,4 +711,122 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		const outcome = await authStorage.markUsageLimitReached(PROVIDER, "sess", { retryAfterMs: 3_600_000 });
 		expect(outcome).toEqual({ switched: false, retryAtMs: undefined });
 	});
+
+	test("strict OAuth selection refuses sibling rotation after a 401", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "acc-A", refresh: "ref-A", expires: farExpiry(), accountId: "account-A" },
+			{ type: "oauth", access: "acc-B", refresh: "ref-B", expires: farExpiry(), accountId: "account-B" },
+		]);
+		const target = authStorage.listStoredOAuthAccounts(PROVIDER).find(account => account.accountId === "account-B");
+		if (!target) throw new Error("expected selected OAuth row");
+		authStorage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: { identityHash: "identity-B", credentialId: target.credentialId } },
+			allowSiblingFailover: false,
+		});
+		const sessionId = "strict-rotation";
+		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe("acc-B");
+
+		expect(
+			await authStorage.rotateSessionCredential(PROVIDER, sessionId, {
+				error: authError(),
+				credentialId: target.credentialId,
+				apiKey: "acc-B",
+			}),
+		).toBe(false);
+
+		authStorage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: { identityHash: "identity-B", credentialId: target.credentialId } },
+			allowSiblingFailover: true,
+		});
+		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe("acc-A");
+	});
+
+	test("strict usage marking blocks the selected row but never reports a sibling switch", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "acc-A", refresh: "ref-A", expires: farExpiry(), accountId: "account-A" },
+			{ type: "oauth", access: "acc-B", refresh: "ref-B", expires: farExpiry(), accountId: "account-B" },
+		]);
+		const target = authStorage.listStoredOAuthAccounts(PROVIDER).find(account => account.accountId === "account-B");
+		if (!target) throw new Error("expected selected OAuth row");
+		authStorage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: { identityHash: "identity-B", credentialId: target.credentialId } },
+			allowSiblingFailover: false,
+		});
+		const sessionId = "strict-usage-mark";
+		expect(await authStorage.getApiKey(PROVIDER, sessionId)).toBe("acc-B");
+
+		const outcome = await authStorage.markUsageLimitReached(PROVIDER, sessionId, {
+			credentialId: target.credentialId,
+			apiKey: "acc-B",
+			retryAfterMs: 30_000,
+		});
+		expect(outcome.switched).toBe(false);
+		expect(authStorage.getOAuthAccountSelection(PROVIDER)).toMatchObject({
+			identityHash: "identity-B",
+			credentialId: target.credentialId,
+			allowSiblingFailover: false,
+		});
+
+		authStorage.setOAuthAccountSelectionPolicy({ selections: {}, allowSiblingFailover: false });
+		expect(await authStorage.getApiKey(PROVIDER, "automatic-after-mark")).toBe("acc-A");
+	});
+
+	test("strict usage marking ignores a stale sibling target and blocks the configured row", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "acc-A", refresh: "ref-A", expires: farExpiry(), accountId: "account-A" },
+			{ type: "oauth", access: "acc-B", refresh: "ref-B", expires: farExpiry(), accountId: "account-B" },
+		]);
+		const accounts = authStorage.listStoredOAuthAccounts(PROVIDER);
+		const sibling = accounts.find(account => account.accountId === "account-A");
+		const target = accounts.find(account => account.accountId === "account-B");
+		if (!sibling || !target) throw new Error("expected both OAuth rows");
+		authStorage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: { identityHash: "identity-B", credentialId: target.credentialId } },
+			allowSiblingFailover: false,
+		});
+
+		const outcome = await authStorage.markUsageLimitReached(PROVIDER, undefined, {
+			credentialId: sibling.credentialId,
+			apiKey: "acc-A",
+			retryAfterMs: 30_000,
+		});
+		expect(outcome.switched).toBe(false);
+
+		authStorage.setOAuthAccountSelectionPolicy({ selections: {}, allowSiblingFailover: false });
+		expect(await authStorage.getApiKey(PROVIDER, "automatic-after-stale-mark")).toBe("acc-A");
+	});
+
+	test("strict hard-auth rotation invalidates the configured row instead of a stale sibling target", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "acc-A", refresh: "ref-A", expires: farExpiry(), accountId: "account-A" },
+			{ type: "oauth", access: "acc-B", refresh: "ref-B", expires: farExpiry(), accountId: "account-B" },
+		]);
+		const accounts = authStorage.listStoredOAuthAccounts(PROVIDER);
+		const sibling = accounts.find(account => account.accountId === "account-A");
+		const target = accounts.find(account => account.accountId === "account-B");
+		if (!sibling || !target) throw new Error("expected both OAuth rows");
+		authStorage.setOAuthAccountSelectionPolicy({
+			selections: { [PROVIDER]: { identityHash: "identity-B", credentialId: target.credentialId } },
+			allowSiblingFailover: false,
+		});
+
+		expect(
+			await authStorage.rotateSessionCredential(PROVIDER, undefined, {
+				error: authError(),
+				credentialId: sibling.credentialId,
+				apiKey: "acc-A",
+			}),
+		).toBe(false);
+
+		authStorage.setOAuthAccountSelectionPolicy({ selections: {}, allowSiblingFailover: false });
+		expect(await authStorage.getApiKey(PROVIDER, "automatic-after-stale-rotation")).toBe("acc-A");
+	});
 });

@@ -19,6 +19,33 @@ export class MissingApiKeyError extends Error {
 	}
 }
 
+/**
+ * A configured OAuth account cannot serve the provider request.
+ *
+ * `identityHash` is an opaque account-selection identifier. Callers may use it
+ * to correlate the unavailable selection, but must not treat it as credential
+ * material.
+ */
+export class OAuthAccountSelectionError extends Error {
+	readonly provider: string;
+	readonly identityHash: string;
+
+	constructor(provider: string, identityHash: string) {
+		super(
+			`Locked OAuth account for "${provider}" is unavailable. Choose another account in /settings > Providers > Accounts.`,
+		);
+		this.name = "OAuthAccountSelectionError";
+		this.provider = provider;
+		this.identityHash = identityHash;
+		attach(this, create(Flag.AuthFailed));
+	}
+}
+
+/** Whether an error is a configured OAuth account selection failure. */
+export function isOAuthAccountSelectionError(error: unknown): error is OAuthAccountSelectionError {
+	return error instanceof OAuthAccountSelectionError;
+}
+
 /** A user-facing login flow required an `onPrompt` callback that was not supplied. */
 export class OnPromptRequiredError extends Error {
 	constructor(providerLabel: string) {

@@ -1108,6 +1108,10 @@ export function streamSimple<TApi extends Api>(
 			try {
 				lastKey = (await apiKeyResolver({ lastChance: false, error: undefined, signal })) || undefined;
 			} catch (error) {
+				if (AIError.isOAuthAccountSelectionError(error)) {
+					outer.fail(error);
+					return;
+				}
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
 				outer.fail(

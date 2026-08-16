@@ -105,7 +105,7 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	return isUsageLimitOutcome(status, message);
 }
 
-/** Resolve a single retry step, swallowing resolver failures into `undefined`. */
+/** Resolve a single retry step, preserving selection failures while swallowing legacy resolver failures into `undefined`. */
 export async function resolveRetryKey(
 	resolver: ApiKeyResolver,
 	lastChance: boolean,
@@ -116,7 +116,8 @@ export async function resolveRetryKey(
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
 		return (await resolver({ lastChance: rotateSibling, error, signal, previousKey })) || undefined;
-	} catch {
+	} catch (error) {
+		if (AIError.isOAuthAccountSelectionError(error)) throw error;
 		return undefined;
 	}
 }
@@ -345,7 +346,8 @@ export async function withOAuthAccess<T>(
 				refreshedCurrent = true;
 				try {
 					next = await storage.getOAuthAccess(provider, sessionId, { forceRefresh: true, signal });
-				} catch {
+				} catch (error) {
+					if (AIError.isOAuthAccountSelectionError(error)) throw error;
 					next = undefined;
 				}
 				if (signal?.aborted) break;
@@ -375,7 +377,8 @@ export async function withOAuthAccess<T>(
 			});
 			if (!rotated) break;
 			next = await storage.getOAuthAccess(provider, sessionId, { signal });
-		} catch {
+		} catch (error) {
+			if (AIError.isOAuthAccountSelectionError(error)) throw error;
 			next = undefined;
 		}
 		if (signal?.aborted || !next) break;

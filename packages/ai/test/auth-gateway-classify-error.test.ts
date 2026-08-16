@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { classifyGatewayError } from "@oh-my-pi/pi-ai/error";
+import { classifyGatewayError, OAuthAccountSelectionError } from "@oh-my-pi/pi-ai/error";
 
 describe("auth-gateway classifyGatewayError", () => {
 	it("honours an explicit numeric `status` property on the error", () => {
@@ -109,6 +109,15 @@ describe("auth-gateway classifyGatewayError", () => {
 		expect(c.type).toBe("request_aborted");
 	});
 
+	it("classifies an OAuth account selection failure as authentication without changing its message", () => {
+		const error = new OAuthAccountSelectionError("openai-codex", "ef".repeat(32));
+		expect(classifyGatewayError(error)).toEqual({
+			status: 401,
+			type: "authentication_error",
+			message:
+				'Locked OAuth account for "openai-codex" is unavailable. Choose another account in /settings > Providers > Accounts.',
+		});
+	});
 	it("falls through to 502 upstream_error when nothing matches", () => {
 		const c = classifyGatewayError(new Error("something inscrutable happened"));
 		expect(c.status).toBe(502);
