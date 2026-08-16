@@ -19,6 +19,12 @@ Key groups:
 - relay control TEXT messages,
 - link/envelope constants shared by host, guest, and local relay code.
 
+## Workspace V1 contracts
+
+Workspace V1 adds JSON-safe document and snapshot shapes for durable workspace topology, locations, tabs, panes, terminals, browsers, previews, agent profiles, capabilities, sessions, services, worktrees, notifications, and cleanup records. Commands carry only transport authentication; the runtime assigns principal and client identity after authentication.
+
+The exported parsers reject unknown versions, malformed IDs, broken graph links, stale generations, oversized payloads, duplicate entity IDs, and durable process/browser identities. `WorkspaceRuntimeProjectionV1` may overlay non-durable health, focus, output cursors, and capability freshness without persisting process IDs, CDP targets, backend node IDs, or bounds.
+
 ## Protocol boundary
 
 `pi-wire` does not encode, decode, validate, encrypt, or route frames. It defines the shared contract used at those boundaries:

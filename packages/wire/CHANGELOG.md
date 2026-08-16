@@ -2,9 +2,10 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added the JSONL request and event contracts for Branchlight's desktop PTY worker.
+- Added dependency-free Workspace V1 document, snapshot, command, ordered event, provider callback, principal, and capability contracts.
+- Added strict runtime parsers, JSON encoders/decoders, graph-link validation, version checks, size caps, and durable-identity safety checks for Workspace V1.
+- Added agent executable/profile, negotiated capability, session alias, and non-durable runtime projection contracts.
+- Added global entity-ID uniqueness enforcement across document and snapshot collections.
 
 ## [16.3.0] - 2026-07-02
 
