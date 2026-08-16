@@ -26,99 +26,64 @@ jobs:
 
           omp_path = Path("packages/desktop/src/renderer/OmpChat.svelte")
           omp = omp_path.read_text()
-          controls = '''  function showError(error: unknown): void { errorMessage = error instanceof Error ? error.message : String(error); }
-          let windowMaximized = false;
-          function minimizeWindow(): void { void window.branchlight.minimizeWindow().catch(showError); }
-          async function toggleMaximizeWindow(): Promise<void> {
-            try { windowMaximized = await window.branchlight.toggleMaximizeWindow(); }
-            catch (error) { showError(error); }
-          }
-          function closeWindow(): void { void window.branchlight.closeWindow().catch(showError); }
-          function formatMessage(value: unknown): string { return typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "[message]"; }
-          '''
-          controls_replacement = '''  function showError(error: unknown): void { errorMessage = error instanceof Error ? error.message : String(error); }
-          function formatMessage(value: unknown): string { return typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "[message]"; }
-          '''
-          if controls not in omp:
-              raise SystemExit("OMP window-control block was not found")
-          omp = omp.replace(controls, controls_replacement, 1)
 
-          nested_shell = '''<svelte:head><title>OMP Chat · {extensionTitle || (kind === "work" ? "Work" : "Code")}</title></svelte:head>
+          controls_start = omp.index("  let windowMaximized = false;")
+          controls_end = omp.index("  function formatMessage", controls_start)
+          omp = omp[:controls_start] + omp[controls_end:]
 
-          <div class="app-shell">
-            <header class="window-bar" aria-label="Window bar">
-              <div class="window-drag"><span class="window-bar-title">OMP Chat</span><span class="window-bar-meta">Oh My Pi · local</span></div>
-              <div class="window-controls">
-                <button type="button" aria-label="Minimize OMP Chat" title="Minimize" onclick={minimizeWindow}>−</button>
-                <button type="button" aria-label={windowMaximized ? "Restore OMP Chat" : "Maximize OMP Chat"} title={windowMaximized ? "Restore" : "Maximize"} aria-pressed={windowMaximized} onclick={() => void toggleMaximizeWindow()}>□</button>
-                <button type="button" class="close-window" aria-label="Close OMP Chat" title="Close" onclick={closeWindow}>×</button>
-              </div>
-            </header>
-            <header class="topbar">
-          '''
-          embedded_shell = '''<div class="app-shell">
-            <header class="topbar">
-          '''
-          if nested_shell not in omp:
-              raise SystemExit("Nested OMP window shell was not found")
-          omp = omp.replace(nested_shell, embedded_shell, 1)
+          head_start = omp.index("<svelte:head>")
+          topbar_start = omp.index('  <header class="topbar">', head_start)
+          omp = omp[:head_start] + '<div class="app-shell">\n' + omp[topbar_start:]
           omp_path.write_text(omp)
 
           app_path = Path("packages/desktop/src/renderer/App.svelte")
           app = app_path.read_text()
-          redundant_css = '''\t.chat-stage :global(.app-shell) {
-          \t\theight: 100%;
-          \t\tmin-height: 0;
-          \t\tgrid-template-rows: auto minmax(0, 1fr);
-          \t}
-          \t.chat-stage :global(.window-bar) { display: none; }
-          '''
-          embedded_css = '''\t.chat-stage :global(.app-shell) {
-          \t\theight: 100%;
-          \t\tmin-height: 0;
-          \t}
-          '''
-          if redundant_css not in app:
-              raise SystemExit("Embedded OMP shell CSS was not found")
-          app_path.write_text(app.replace(redundant_css, embedded_css, 1))
+          redundant_grid = "\t\tgrid-template-rows: auto minmax(0, 1fr);\n"
+          hidden_window_bar = "\t.chat-stage :global(.window-bar) { display: none; }\n"
+          if redundant_grid not in app or hidden_window_bar not in app:
+              raise SystemExit("Embedded OMP shell cleanup markers were not found")
+          app = app.replace(redundant_grid, "", 1).replace(hidden_window_bar, "", 1)
+          app_path.write_text(app)
 
           semantic_path = Path("packages/desktop/src/renderer/styles/_semantic.scss")
           semantic = semantic_path.read_text()
-          app_shell = '.app-shell { height: 100%; display: flex; flex-direction: column; }'
+          app_shell = ".app-shell { height: 100%; display: flex; flex-direction: column; }"
           if app_shell not in semantic:
               raise SystemExit("Global app-shell rule was not found")
           semantic_path.write_text(semantic.replace(
               app_shell,
-              '.app-shell { height: 100%; min-height: 0; display: flex; flex-direction: column; }',
+              ".app-shell { height: 100%; min-height: 0; display: flex; flex-direction: column; }",
               1,
           ))
 
           main_path = Path("packages/desktop/src/main/main.ts")
           main = main_path.read_text()
-          profile_anchor = '''\tconst workspaceId = document.workspaces[0]?.id ?? DEFAULT_WORKSPACE_ID;
-          \tconst defaultProfiles = [
-          '''
-          profile_migration = '''\tconst workspaceId = document.workspaces[0]?.id ?? DEFAULT_WORKSPACE_ID;
-          \tfor (const profileId of ["profile-codex", "profile-claude"] as const) {
-          \t\tif (!document.agentProfiles.some(item => item.id === profileId)) continue;
-          \t\tif (
-          \t\t\tdocument.agents.some(item => item.profileId === profileId) ||
-          \t\t\tdocument.terminals.some(item => item.profileId === profileId)
-          \t\t) {
-          \t\t\tcontinue;
-          \t\t}
-          \t\tdocument = await executeBootstrapCommand(client, {
-          \t\t\tversion: 1,
-          \t\t\tcommandId: `profile-retire-${profileId}`,
-          \t\t\tworkspaceId,
-          \t\t\texpectedRevision: document.revision,
-          \t\t\tissuedAt: 1,
-          \t\t\ttype: "profile.delete",
-          \t\t\tpayload: { id: profileId },
-          \t\t});
-          \t}
-          \tconst defaultProfiles = [
-          '''
+          profile_anchor = (
+              "\tconst workspaceId = document.workspaces[0]?.id ?? DEFAULT_WORKSPACE_ID;\n"
+              "\tconst defaultProfiles = [\n"
+          )
+          profile_migration = (
+              "\tconst workspaceId = document.workspaces[0]?.id ?? DEFAULT_WORKSPACE_ID;\n"
+              "\tfor (const profileId of [\"profile-codex\", \"profile-claude\"] as const) {\n"
+              "\t\tif (!document.agentProfiles.some(item => item.id === profileId)) continue;\n"
+              "\t\tif (\n"
+              "\t\t\tdocument.agents.some(item => item.profileId === profileId) ||\n"
+              "\t\t\tdocument.terminals.some(item => item.profileId === profileId)\n"
+              "\t\t) {\n"
+              "\t\t\tcontinue;\n"
+              "\t\t}\n"
+              "\t\tdocument = await executeBootstrapCommand(client, {\n"
+              "\t\t\tversion: 1,\n"
+              "\t\t\tcommandId: `profile-retire-${profileId}`,\n"
+              "\t\t\tworkspaceId,\n"
+              "\t\t\texpectedRevision: document.revision,\n"
+              "\t\t\tissuedAt: 1,\n"
+              "\t\t\ttype: \"profile.delete\",\n"
+              "\t\t\tpayload: { id: profileId },\n"
+              "\t\t});\n"
+              "\t}\n"
+              "\tconst defaultProfiles = [\n"
+          )
           if profile_anchor not in main:
               raise SystemExit("Default profile anchor was not found")
           main_path.write_text(main.replace(profile_anchor, profile_migration, 1))
