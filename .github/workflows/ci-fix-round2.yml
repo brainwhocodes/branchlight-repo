@@ -31,15 +31,15 @@ jobs:
             packages/workspace-runtime/tsconfig.publish.json
           bash -n scripts/install-tests/run-ci.sh
 
-          bun run ci:check:full
-          (cd packages/coding-agent && bun test test/rpc-client.restart.test.ts --parallel=1 --timeout=30000)
-          bun scripts/ci-release-publish.ts --dry-run
-
           tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
           curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
           mkdir -p packages/natives/native
           cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" packages/natives/native/
           cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" packages/natives/native/
+
+          bun run ci:check:full
+          (cd packages/coding-agent && bun test test/rpc-client.restart.test.ts --parallel=1 --timeout=30000)
+          bun scripts/ci-release-publish.ts --dry-run
           OMP_INSTALL_TEST_SKIP_NATIVE_BUILD=1 bun run ci:test:install-methods
 
           rm .github/workflows/ci-fix-round2.yml
