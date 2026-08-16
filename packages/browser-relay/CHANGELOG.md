@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Changed the relay smoke harness to exercise the Playwright 1.62.1 CDP client against the unpacked extension and OMP-managed Chromium.
 
 ## [17.2.5] - 2026-08-03
 
