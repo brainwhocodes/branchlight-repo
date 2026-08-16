@@ -7,21 +7,25 @@ import { VitePlugin } from "@electron-forge/plugin-vite";
 import type { ForgeConfig } from "@electron-forge/shared-types";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
+const backendName = process.platform === "win32" ? "omp.exe" : "omp";
 const config: ForgeConfig = {
 	packagerConfig: {
-		asar: true,
+		name: "Mars Kommander",
+		asar: {
+			unpackDir: path.join(".vite", "native"),
+		},
 		prune: false,
-		executableName: "Branchlight",
-		appBundleId: "labs.branchlight.desktop",
+		executableName: "Mars Kommander",
+		appBundleId: "labs.mars-kommander.desktop",
 		win32metadata: {
-			CompanyName: "Branchlight Labs",
-			FileDescription: "Branchlight desktop agent workspace",
-			ProductName: "Branchlight",
-			OriginalFilename: "Branchlight.exe",
+			CompanyName: "Mars Kommander Labs",
+			FileDescription: "Mars Kommander desktop agent workspace",
+			ProductName: "Mars Kommander",
+			OriginalFilename: "Mars Kommander.exe",
 		},
 		icon: path.join(root, "resources", "icon"),
 		extraResource: [
-			path.join(root, "..", "coding-agent", "dist", "omp.exe"),
+			path.join(root, "..", "coding-agent", "dist", backendName),
 			path.join(root, "THIRD_PARTY_LICENSES.txt"),
 			path.join(root, "resources", "rpc-config.yml"),
 		],

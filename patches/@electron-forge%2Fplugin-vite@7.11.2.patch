@@ -1,0 +1,38 @@
+diff --git a/dist/VitePlugin.js b/dist/VitePlugin.js
+--- a/dist/VitePlugin.js
++++ b/dist/VitePlugin.js
+@@ -12,7 +12,7 @@ const chalk_1 = __importDefault(require("chalk"));
+ const debug_1 = __importDefault(require("debug"));
+ const fs_extra_1 = __importDefault(require("fs-extra"));
+ const listr2_1 = require("listr2");
+-const vite_1 = __importDefault(require("vite"));
++const vite_1 = require("vite");
+ const ViteConfig_1 = __importDefault(require("./ViteConfig"));
+ const d = (0, debug_1.default)('electron-forge:plugin:vite');
+ class VitePlugin extends plugin_base_1.PluginBase {
+@@ -192,7 +192,7 @@ class VitePlugin extends plugin_base_1.PluginBase {
+                         // only after all bundles are done generated. This is done in the `closeBundle` Rollup hook
+                         // rather than when the `vite.build` promise resolves.
+                         await new Promise((resolve, reject) => {
+-                            vite_1.default
++                            vite_1
+                                 .build({
+                                 // Avoid recursive builds caused by users configuring @electron-forge/plugin-vite in Vite config file.
+                                 configFile: false,
+@@ -256,6 +256,6 @@ class VitePlugin extends plugin_base_1.PluginBase {
+             return task?.newListr(rendererConfigs.map((userConfig) => ({
+                 task: async (_ctx, subtask) => {
+-                    await vite_1.default.build({
++                    await vite_1.build({
+                         configFile: false,
+                         logLevel: 'error',
+                         ...userConfig,
+@@ -271,7 +271,7 @@ class VitePlugin extends plugin_base_1.PluginBase {
+             return task?.newListr(rendererConfigs.map((userConfig) => ({
+                 title: `Target ${chalk_1.default.cyan(node_path_1.default.basename(userConfig.build?.outDir ?? ''))}`,
+                 task: async (_ctx, subtask) => {
+-                    const viteDevServer = await vite_1.default.createServer({
++                    const viteDevServer = await vite_1.createServer({
+                         configFile: false,
+                         ...userConfig,
+                     });

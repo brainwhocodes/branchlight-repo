@@ -7,12 +7,17 @@ import type {
 	BootstrapSnapshot,
 	BranchlightApi,
 	BranchlightEvent,
+	BranchlightSettings,
 	BrowserBounds,
 	BrowserNavigationAction,
 	BrowserViewState,
+	CreateBrowserInput,
+	CreateTerminalInput,
+	ElementEditState,
 	FileDiffView,
 	InterruptMode,
 	ModelOption,
+	OAuthAccountsView,
 	OpenRouterModelRouting,
 	QueueMode,
 	SessionSnapshot,
@@ -21,6 +26,7 @@ import type {
 	ThinkingLevel,
 	TimelineItem,
 	TimelinePage,
+	WorkspaceDocumentV1,
 	WorkspaceEvent,
 } from "../shared/contracts";
 
@@ -50,9 +56,11 @@ function paneId(value: unknown): string {
 }
 
 function terminalDimension(value: unknown, label: string): number {
-	if (!Number.isSafeInteger(value) || (value as number) < 2 || (value as number) > 500)
-		throw new RangeError(`${label} must be between 2 and 500`);
-	return value as number;
+	if (typeof value !== "number" || !Number.isFinite(value)) {
+		throw new TypeError(`${label} must be a number`);
+	}
+	const rounded = Math.round(value);
+	return Math.max(2, Math.min(500, rounded));
 }
 
 function browserBounds(value: unknown): BrowserBounds {
@@ -76,6 +84,13 @@ function browserAction(value: unknown): BrowserNavigationAction {
 		throw new TypeError("invalid browser action");
 	return value;
 }
+function optionalTabLayout(value: unknown): "columns" | "rows" | "grid" | undefined {
+	if (value === undefined) return undefined;
+	if (value !== "columns" && value !== "rows" && value !== "grid") {
+		throw new TypeError("layout must be columns, rows, or grid");
+	}
+	return value;
+}
 
 function extensionResponse(value: unknown): unknown {
 	if (typeof value !== "object" || value === null || !("id" in value))
@@ -90,6 +105,10 @@ const authProvider = (value: unknown): string => {
 	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9._-]{0,159}$/i.test(value))
 		throw new TypeError("unsupported auth provider");
 	return value;
+};
+const credentialId = (value: unknown): number => {
+	if (!Number.isSafeInteger(value) || (value as number) < 0) throw new TypeError("invalid credential id");
+	return value as number;
 };
 const agentSettingValue = (value: unknown): AgentSettingValue => {
 	if (
@@ -122,15 +141,55 @@ const interruptMode = (value: unknown): InterruptMode => {
 	if (value !== "immediate" && value !== "wait") throw new TypeError("invalid interrupt mode");
 	return value;
 };
-
+const optionalAgentId = (value: unknown): string | undefined => {
+	if (value === undefined || value === null) return undefined;
+	return text(value, "agent id");
+};
+const optionalReason = (value: unknown): string | undefined => {
+	if (value === undefined || value === null) return undefined;
+	return text(value, "cancel reason");
+};
+const optionalInstruction = (value: unknown): string | undefined => {
+	if (value === undefined || value === null) return undefined;
+	return text(value, "instruction");
+};
+const optionalCaptureMode = (value: unknown): "dom" | "screenshot" | undefined => {
+	if (value === undefined || value === null) return undefined;
+	if (value !== "dom" && value !== "screenshot") throw new TypeError("captureMode must be dom or screenshot");
+	return value;
+};
 const api: BranchlightApi = {
 	getAuthStatus: () => ipcRenderer.invoke("branchlight:auth-status") as Promise<AuthAccountView[]>,
+	getOAuthAccounts: () => ipcRenderer.invoke("branchlight:oauth-accounts") as Promise<OAuthAccountsView>,
+	setOAuthAccountLock: (provider, credential) =>
+		ipcRenderer.invoke(
+			"branchlight:set-oauth-account-lock",
+			authProvider(provider),
+			credential === undefined ? undefined : credentialId(credential),
+		) as Promise<OAuthAccountsView>,
+	setOAuthAccountFailover: enabled => {
+		if (typeof enabled !== "boolean") throw new TypeError("account failover must be boolean");
+		return ipcRenderer.invoke("branchlight:set-oauth-account-failover", enabled) as Promise<OAuthAccountsView>;
+	},
+	removeOAuthAccount: (provider, credential) =>
+		ipcRenderer.invoke(
+			"branchlight:remove-oauth-account",
+			authProvider(provider),
+			credentialId(credential),
+		) as Promise<OAuthAccountsView>,
 	loginProvider: provider =>
 		ipcRenderer.invoke("branchlight:auth-login", authProvider(provider)) as Promise<AuthAccountView[]>,
 	logoutProvider: provider =>
 		ipcRenderer.invoke("branchlight:auth-logout", authProvider(provider)) as Promise<AuthAccountView[]>,
 	respondAuthPrompt: value =>
 		ipcRenderer.invoke("branchlight:auth-prompt", text(value, "auth prompt")) as Promise<void>,
+	getAppSettings: () => ipcRenderer.invoke("branchlight:settings-get") as Promise<BranchlightSettings>,
+	updateAppSettings: updates =>
+		ipcRenderer.invoke(
+			"branchlight:settings-update",
+			typeof updates === "object" && updates !== null ? updates : {},
+		) as Promise<BranchlightSettings>,
+	resetAppSettings: () => ipcRenderer.invoke("branchlight:settings-reset") as Promise<BranchlightSettings>,
 	getAgentSettings: id =>
 		ipcRenderer.invoke("branchlight:agent-settings", id === undefined ? undefined : sessionId(id)) as Promise<
 			AgentSettingView[]
@@ -238,10 +297,19 @@ const api: BranchlightApi = {
 			text(target, "workspace target"),
 		) as Promise<void>,
 	openExternal: url => ipcRenderer.invoke("branchlight:open-external", text(url, "URL")) as Promise<void>,
-	createBrowser: (id, url) =>
-		ipcRenderer.invoke("branchlight:browser-create", paneId(id), text(url, "URL")) as Promise<BrowserViewState>,
-	nameBrowser: (id, name) =>
-		ipcRenderer.invoke("branchlight:browser-name", paneId(id), sessionName(name)) as Promise<void>,
+	getWorkspaceDocument: () =>
+		ipcRenderer.invoke("branchlight:workspace-document-get") as Promise<WorkspaceDocumentV1 | null>,
+	createBrowser: options => {
+		if (typeof options !== "object" || options === null) throw new TypeError("CreateBrowserInput must be an object");
+		const o = options as CreateBrowserInput;
+		return ipcRenderer.invoke("branchlight:browser-create", {
+			id: paneId(o.id),
+			url: text(o.url, "URL"),
+			workspaceId: text(o.workspaceId, "workspace ID"),
+			tabId: text(o.tabId, "tab ID"),
+			...(o.layout !== undefined ? { layout: optionalTabLayout(o.layout) } : {}),
+		}) as Promise<BrowserViewState>;
+	},
 	navigateBrowser: (id, url) =>
 		ipcRenderer.invoke("branchlight:browser-navigate", paneId(id), text(url, "URL")) as Promise<BrowserViewState>,
 	controlBrowser: (id, action) =>
@@ -253,13 +321,22 @@ const api: BranchlightApi = {
 		return ipcRenderer.invoke("branchlight:browser-visible", ids.map(paneId)) as Promise<void>;
 	},
 	closeBrowser: id => ipcRenderer.invoke("branchlight:browser-close", paneId(id)) as Promise<void>,
-	createTerminal: (id, cols, rows) =>
-		ipcRenderer.invoke(
-			"branchlight:terminal-create",
-			paneId(id),
-			terminalDimension(cols, "columns"),
-			terminalDimension(rows, "rows"),
-		) as Promise<TerminalViewState>,
+	showPaneContextMenu: (id, canSplit) => {
+		if (typeof canSplit !== "boolean") throw new TypeError("pane split availability must be boolean");
+		ipcRenderer.send("branchlight:pane-context-menu", paneId(id), canSplit);
+	},
+	createTerminal: options => {
+		if (typeof options !== "object" || options === null) throw new TypeError("CreateTerminalInput must be an object");
+		const o = options as CreateTerminalInput;
+		return ipcRenderer.invoke("branchlight:terminal-create", {
+			id: paneId(o.id),
+			tabId: text(o.tabId, "tab ID"),
+			workspaceId: text(o.workspaceId, "workspace ID"),
+			cols: terminalDimension(o.cols, "columns"),
+			rows: terminalDimension(o.rows, "rows"),
+			...(o.layout !== undefined ? { layout: optionalTabLayout(o.layout) } : {}),
+		}) as Promise<TerminalViewState>;
+	},
 	writeTerminal: (id, data) =>
 		ipcRenderer.invoke("branchlight:terminal-write", paneId(id), text(data, "terminal input")) as Promise<void>,
 	resizeTerminal: (id, cols, rows) =>
@@ -270,6 +347,12 @@ const api: BranchlightApi = {
 			terminalDimension(rows, "rows"),
 		) as Promise<void>,
 	closeTerminal: id => ipcRenderer.invoke("branchlight:terminal-close", paneId(id)) as Promise<void>,
+	updateTab: (tabId, updates) => {
+		if (typeof updates !== "object" || updates === null) throw new TypeError("UpdateTabInput must be an object");
+		return ipcRenderer.invoke("branchlight:tab-update", text(tabId, "tab ID"), updates) as Promise<void>;
+	},
+	closeTab: tabId => ipcRenderer.invoke("branchlight:tab-close", text(tabId, "tab ID")) as Promise<void>,
+	closePane: paneIdValue => ipcRenderer.invoke("branchlight:pane-close", paneId(paneIdValue)) as Promise<void>,
 	minimizeWindow: () => ipcRenderer.invoke("branchlight:window-minimize") as Promise<void>,
 	toggleMaximizeWindow: () => ipcRenderer.invoke("branchlight:window-toggle-maximize") as Promise<boolean>,
 	closeWindow: () => ipcRenderer.invoke("branchlight:window-close") as Promise<void>,
@@ -287,6 +370,36 @@ const api: BranchlightApi = {
 		const handler = (_event: Electron.IpcRendererEvent, value: WorkspaceEvent) => listener(value);
 		ipcRenderer.on("branchlight:workspace", handler);
 		return () => ipcRenderer.removeListener("branchlight:workspace", handler);
+	},
+	onWorkspaceDocument: listener => {
+		const handler = (_event: Electron.IpcRendererEvent, doc: WorkspaceDocumentV1) => listener(doc);
+		ipcRenderer.on("branchlight:workspace-document", handler);
+		return () => ipcRenderer.removeListener("branchlight:workspace-document", handler);
+	},
+	startSelection: (id: string, agent?: string, captureMode?: "dom" | "screenshot") =>
+		ipcRenderer.invoke(
+			"branchlight:selection-start",
+			paneId(id),
+			optionalAgentId(agent),
+			optionalCaptureMode(captureMode),
+		) as Promise<ElementEditState>,
+	cancelSelection: (id, reason) =>
+		ipcRenderer.invoke(
+			"branchlight:selection-cancel",
+			paneId(id),
+			optionalReason(reason),
+		) as Promise<ElementEditState>,
+	commitSelection: (id, instruction) =>
+		ipcRenderer.invoke(
+			"branchlight:selection-commit",
+			paneId(id),
+			optionalInstruction(instruction),
+		) as Promise<ElementEditState>,
+	getSelectionState: id => ipcRenderer.invoke("branchlight:selection-state", paneId(id)) as Promise<ElementEditState>,
+	onSelectionStateChanged: listener => {
+		const handler = (_event: Electron.IpcRendererEvent, state: ElementEditState) => listener(state);
+		ipcRenderer.on("branchlight:selection-state", handler);
+		return () => ipcRenderer.removeListener("branchlight:selection-state", handler);
 	},
 };
 

@@ -1,5 +1,6 @@
 {
   "name": "@branchlight/desktop",
+  "productName": "Mars Kommander",
   "version": "0.1.0",
   "private": true,
   "description": "Branchlight desktop agent workspace",
@@ -7,18 +8,25 @@
   "license": "MIT",
   "main": ".vite/build/main.js",
   "scripts": {
-    "start": "electron-forge start",
+    "start": "bun run backend:build && electron-forge start",
     "backend:build": "bun scripts/build-backend.ts",
     "check": "biome check . && bun run check:types && bun run check:styles",
     "check:types": "tsgo -p tsconfig.json --noEmit && bun scripts/check-svelte.ts --tsconfig ./tsconfig.json --tsgo",
     "check:styles": "bun scripts/check-styles.ts",
     "test": "vitest run",
-    "test:e2e": "playwright test",
+    "build:e2e": "bun run backend:build && electron-forge package",
+    "test:e2e": "bun run build:e2e && playwright test",
+    "test:e2e:browser": "bun run build:e2e && playwright test e2e/desktop.spec.ts",
+    "test:e2e:selection": "bun run build:e2e && playwright test e2e/omp-selection.spec.ts",
     "test:e2e:real": "BRANCHLIGHT_REAL_OMP=1 playwright test --config playwright.real.config.ts",
     "test:e2e:packaged": "playwright test --config playwright.packaged.config.ts",
     "package": "electron-forge package",
     "test:e2e:performance": "playwright test --config playwright.performance.config.ts",
     "make": "electron-forge make"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-grpc": "catalog:",
+    "@oh-my-pi/pi-workspace-runtime": "catalog:"
   },
   "devDependencies": {
     "@axe-core/playwright": "catalog:",
@@ -34,11 +42,9 @@
     "@solar-icons/svelte": "catalog:",
     "@sveltejs/vite-plugin-svelte": "catalog:",
     "@types/bun": "catalog:",
-    "bulma": "catalog:",
-    "electron": "catalog:",
+    "electron": "43.3.0",
     "playwright": "catalog:",
     "sass": "catalog:",
-    "puppeteer-core": "catalog:",
     "@playwright/test": "catalog:",
     "svelte": "catalog:",
     "ghostty-web": "catalog:",

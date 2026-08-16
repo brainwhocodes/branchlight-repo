@@ -1,5 +1,5 @@
 {
-  "extends": "../../tsconfig.json",
+  "extends": "../tsconfig.workspace.json",
   "compilerOptions": {
     "target": "ES2024",
     "module": "ESNext",

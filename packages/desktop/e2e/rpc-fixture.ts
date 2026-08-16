@@ -1,6 +1,11 @@
-const fs = require("node:fs");
-const path = require("node:path");
-const readline = require("node:readline");
+import fs from "node:fs";
+import path from "node:path";
+import {
+  OMP_GRPC_MAX_MESSAGE_BYTES,
+  OMP_GRPC_PROTOCOL_VERSION,
+  listenOmpGrpc,
+  writeOmpGrpcBootstrapFile,
+} from "@oh-my-pi/pi-grpc";
 
 const performanceFixture = process.env.BRANCHLIGHT_PERF_FIXTURE === "1";
 const performanceMessages = performanceFixture
@@ -46,6 +51,29 @@ const openRouterProviders = [
   { id: "openai", name: "OpenAI" },
 ];
 const disabledOpenRouterProviders = new Set();
+const fixtureOAuthAccounts = [
+  {
+    credentialId: 101,
+    email: "alex@branchlight.dev",
+    accountId: "acct-openai-primary",
+    orgId: "org-branchlight",
+    orgName: "Branchlight Labs",
+    projectId: "project-branchlight-desktop",
+    active: true,
+    lockable: true,
+  },
+  {
+    credentialId: 202,
+    email: "riley@northstar.dev",
+    accountId: "acct-openai-secondary",
+    orgId: "org-northstar",
+    orgName: "Northstar Studio",
+    projectId: "project-northstar-app",
+    active: false,
+    lockable: true,
+  },
+];
+
 
 function openRouterRouting(modelId) {
   return {
@@ -165,7 +193,37 @@ const resumeIndex = args.indexOf("--resume");
 const sessionFile = resumeIndex >= 0 ? args[resumeIndex + 1] : path.join(cwd, ".branchlight-fixture.jsonl");
 const sessionId = "fixture-session-0001";
 const authStateFile = process.env.BRANCHLIGHT_AUTH_FILE;
-let authenticated = Boolean(authStateFile && fs.existsSync(authStateFile));
+let authenticated = false;
+let storedOAuthAccounts: typeof fixtureOAuthAccounts = [];
+let lockedOAuthCredentialId: number | undefined;
+let oauthAccountFailover = false;
+if (authStateFile) {
+  try {
+    const serializedState = fs.readFileSync(authStateFile, "utf8").trim();
+    if (serializedState === "authenticated") {
+      authenticated = true;
+      storedOAuthAccounts = fixtureOAuthAccounts.map(account => ({ ...account }));
+    } else {
+      const savedState = JSON.parse(serializedState);
+      if (savedState?.authenticated === true) {
+        authenticated = true;
+        const savedCredentialIds = new Set(
+          Array.isArray(savedState.accounts)
+            ? savedState.accounts.flatMap(account => Number.isSafeInteger(account?.credentialId) ? [account.credentialId] : [])
+            : fixtureOAuthAccounts.map(account => account.credentialId),
+        );
+        storedOAuthAccounts = fixtureOAuthAccounts
+          .filter(account => savedCredentialIds.has(account.credentialId))
+          .map(account => ({ ...account }));
+        lockedOAuthCredentialId = Number.isSafeInteger(savedState.lockedCredentialId)
+          && storedOAuthAccounts.some(account => account.credentialId === savedState.lockedCredentialId)
+          ? savedState.lockedCredentialId
+          : undefined;
+        oauthAccountFailover = savedState.failover === true;
+      }
+    }
+  } catch {}
+}
 let pendingAuth;
 let pendingAgentPrompt;
 let model = modelOptions[0];
@@ -177,25 +235,78 @@ let interruptMode = "immediate";
 let autoCompactionEnabled = true;
 let autoRetryEnabled = true;
 
+function persistOAuthState() {
+  if (!authStateFile || !authenticated) return;
+  fs.writeFileSync(authStateFile, `${JSON.stringify({
+    authenticated,
+    accounts: storedOAuthAccounts,
+    lockedCredentialId: lockedOAuthCredentialId,
+    failover: oauthAccountFailover,
+  }, null, 2)}\n`, "utf8");
+}
+
+function oauthAccountsResponse() {
+  const lockedCredentialId = storedOAuthAccounts.some(account => account.credentialId === lockedOAuthCredentialId)
+    ? lockedOAuthCredentialId
+    : undefined;
+  return {
+    providers: [{
+      id: "openai-codex",
+      name: "ChatGPT Plus/Pro",
+      available: true,
+      failover: oauthAccountFailover,
+      ...(lockedCredentialId === undefined ? {} : { lockedCredentialId }),
+      accounts: storedOAuthAccounts.map(account => ({
+        ...account,
+        locked: account.credentialId === lockedCredentialId,
+      })),
+    }],
+  };
+}
+
+
+
 fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
 if (!fs.existsSync(sessionFile)) fs.writeFileSync(sessionFile, "fixture\n", "utf8");
 
+const grpcHost = process.env.OMP_GRPC_HOST;
+const grpcPort = Number(process.env.OMP_GRPC_PORT);
+const grpcToken = process.env.OMP_GRPC_TOKEN;
+const grpcReadyFile = process.env.OMP_GRPC_READY_FILE;
+if (!grpcHost || !Number.isInteger(grpcPort) || !grpcToken || !grpcReadyFile) {
+  throw new Error("Fixture requires OMP gRPC bootstrap environment");
+}
+const grpcServer = await listenOmpGrpc({ host: grpcHost, port: grpcPort, token: grpcToken });
+await writeOmpGrpcBootstrapFile(grpcReadyFile, grpcServer.bootstrap);
+const connection = await grpcServer.accept();
+let sendQueue = connection.send({
+  kind: "ready",
+  protocolVersion: OMP_GRPC_PROTOCOL_VERSION,
+  maxMessageBytes: OMP_GRPC_MAX_MESSAGE_BYTES,
+});
+
 function send(value) {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
+  const { type, ...payload } = value;
+  const frame = type === "response"
+    ? {
+        kind: "response",
+        id: typeof value.id === "string" ? value.id : undefined,
+        command: value.command,
+        success: value.success,
+        data: value.data,
+        error: value.error,
+        code: value.code,
+      }
+    : { kind: "push", type, payload };
+  sendQueue = sendQueue.then(() => connection.send(frame));
 }
 
-send({ type: "ready", maxFrameBytes: 1024 * 1024, maxReassembledFrameBytes: 64 * 1024 * 1024 });
 setTimeout(() => send({ type: "available_commands_update", commands: availableCommands }), 10);
 
-const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-input.on("line", line => {
-  let command;
-  try {
-    command = JSON.parse(line);
-  } catch {
-    send({ type: "rpc_frame_error", error: "fixture received malformed JSON" });
-    return;
-  }
+function handleFrame(frame) {
+  const command = frame.kind === "command"
+    ? { id: frame.command.id, type: frame.command.command, ...frame.command.payload }
+    : { type: frame.type, ...frame.payload };
   const response = (data, success = true, responseId = command.id, responseCommand = command.type) => send({
     type: "response",
     id: responseId,
@@ -231,7 +342,6 @@ input.on("line", line => {
     }, 400);
   };
 
-  if (command.type === "negotiate_protocol") return response({ protocolVersion: 2 });
   if (command.type === "get_state") return response({
     sessionId,
     sessionFile,
@@ -251,6 +361,14 @@ input.on("line", line => {
     messageCount: historyMessages.length,
     queuedMessageCount: 0,
     todoPhases: [{ name: "Fixture progress", tasks: [{ content: "Exercise the desktop boundary", status: "completed" }] }],
+    runtime: {
+      pid: process.pid,
+      uptimeMs: Math.round(process.uptime() * 1_000),
+      residentMemoryBytes: process.memoryUsage().rss,
+      heapUsedBytes: process.memoryUsage().heapUsed,
+      heapTotalBytes: process.memoryUsage().heapTotal,
+      externalMemoryBytes: process.memoryUsage().external,
+    },
   });
   if (command.type === "get_available_commands") return response({ commands: availableCommands });
   if (command.type === "get_available_models") return response({ models: modelOptions });
@@ -267,6 +385,36 @@ input.on("line", line => {
       { id: "github-copilot", name: "GitHub Copilot", available: false, authenticated: false },
     ],
   });
+  if (command.type === "get_oauth_accounts") return response(oauthAccountsResponse());
+  if (command.type === "set_oauth_account_lock") {
+    if (command.providerId !== "openai-codex") return response(undefined, false);
+    if (command.credentialId === undefined) {
+      lockedOAuthCredentialId = undefined;
+    } else if (storedOAuthAccounts.some(account => account.credentialId === command.credentialId)) {
+      lockedOAuthCredentialId = command.credentialId;
+    } else {
+      return response(undefined, false);
+    }
+    persistOAuthState();
+    return response(oauthAccountsResponse());
+  }
+  if (command.type === "set_oauth_account_failover") {
+    oauthAccountFailover = command.enabled === true;
+    persistOAuthState();
+    return response(oauthAccountsResponse());
+  }
+  if (command.type === "remove_oauth_account") {
+    if (command.providerId !== "openai-codex") return response(undefined, false);
+    const removedAccount = storedOAuthAccounts.find(account => account.credentialId === command.credentialId);
+    if (!removedAccount) return response(undefined, false);
+    storedOAuthAccounts = storedOAuthAccounts.filter(account => account.credentialId !== command.credentialId);
+    if (lockedOAuthCredentialId === command.credentialId) lockedOAuthCredentialId = undefined;
+    if (removedAccount.active && storedOAuthAccounts.length > 0) {
+      storedOAuthAccounts = storedOAuthAccounts.map((account, index) => ({ ...account, active: index === 0 }));
+    }
+    persistOAuthState();
+    return response(oauthAccountsResponse());
+  }
   if (command.type === "get_settings") return response({ settings: agentSettings });
   if (command.type === "set_setting") {
     const index = agentSettings.findIndex(setting => setting.path === command.path);
@@ -282,7 +430,14 @@ input.on("line", line => {
   }
   if (command.type === "extension_ui_response" && pendingAuth?.promptId === command.id) {
     authenticated = typeof command.value === "string" && command.value.length > 0;
-    if (authenticated && authStateFile) fs.writeFileSync(authStateFile, "authenticated\n", "utf8");
+    if (authenticated) {
+      storedOAuthAccounts = fixtureOAuthAccounts.map(account => ({ ...account }));
+      lockedOAuthCredentialId = undefined;
+      persistOAuthState();
+    } else {
+      storedOAuthAccounts = [];
+      lockedOAuthCredentialId = undefined;
+    }
     response({ providerId: "openai-codex" }, true, pendingAuth.command.id, "login");
     pendingAuth = undefined;
     return;
@@ -295,6 +450,8 @@ input.on("line", line => {
   }
   if (command.type === "logout" && command.providerId === "openai-codex") {
     authenticated = false;
+    storedOAuthAccounts = [];
+    lockedOAuthCredentialId = undefined;
     if (authStateFile) {
       try {
         fs.unlinkSync(authStateFile);
@@ -380,5 +537,8 @@ input.on("line", line => {
   }
   if (command.type === "prompt_result") return response({ agentInvoked: false });
   response(undefined, false);
-});
-input.on("close", () => process.exit(0));
+}
+for await (const frame of connection.frames) handleFrame(frame);
+await sendQueue;
+await connection.close();
+await grpcServer.close();

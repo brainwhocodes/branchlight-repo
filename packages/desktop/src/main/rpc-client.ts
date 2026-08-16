@@ -1,9 +1,9 @@
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import {
-	MAX_RPC_FRAME_BYTES,
-	MAX_RPC_REASSEMBLED_BYTES,
-	RpcFrameDecoder,
-} from "../../../coding-agent/src/modes/rpc/rpc-frame";
+	OMP_GRPC_MAX_MESSAGE_BYTES,
+	OMP_GRPC_PROTOCOL_VERSION,
+	type OmpGrpcClientConnection,
+	type OmpGrpcServerFrame,
+} from "@oh-my-pi/pi-grpc";
 import type { RpcCommand, RpcExtensionUIRequest, RpcExtensionUIResponse, RpcResponse } from "../shared/rpc-wire";
 
 type RpcEventListener = (event: unknown) => void;
@@ -16,47 +16,34 @@ type PendingRequest = {
 };
 
 export class RpcClient {
-	#child: ChildProcessWithoutNullStreams;
-	#decoder = new RpcFrameDecoder();
-	#buffer = Buffer.alloc(0);
+	#connection: OmpGrpcClientConnection;
 	#pending = new Map<string, PendingRequest>();
 	#events = new Set<RpcEventListener>();
 	#extensions = new Set<RpcExtensionListener>();
 	#sequence = 0;
 	#closed = false;
-	#readyResolve: (() => void) | undefined;
-	#readyReject: ((error: Error) => void) | undefined;
-	#ready = new Promise<void>((resolve, reject) => {
-		this.#readyResolve = resolve;
-		this.#readyReject = reject;
-	});
+	#readyReceived = false;
+	#ready = Promise.withResolvers<void>();
+	#closePromise: Promise<void> | undefined;
+	#readTask: Promise<void>;
 
-	constructor(child: ChildProcessWithoutNullStreams) {
-		this.#child = child;
-		child.stdout.on("data", (chunk: Buffer) => this.#onData(chunk));
-		child.stdout.on("error", error => this.#fail(error instanceof Error ? error : new Error(String(error))));
-		child.on("error", error => this.#fail(error instanceof Error ? error : new Error(String(error))));
-		child.on("exit", (code, signal) => this.#fail(new Error(`OMP exited (${code ?? signal ?? "unknown"})`)));
-	}
-
-	get process(): ChildProcessWithoutNullStreams {
-		return this.#child;
+	constructor(connection: OmpGrpcClientConnection) {
+		this.#connection = connection;
+		this.#readTask = this.#readFrames();
 	}
 
 	onEvent(listener: RpcEventListener): () => void {
 		this.#events.add(listener);
 		return () => this.#events.delete(listener);
 	}
+
 	onExtension(listener: RpcExtensionListener): () => void {
 		this.#extensions.add(listener);
 		return () => this.#extensions.delete(listener);
 	}
 
 	async start(): Promise<void> {
-		await this.#ready;
-		const readyResponse = await this.request({ type: "negotiate_protocol", protocolVersion: 2 });
-		if (!readyResponse.success || readyResponse.command !== "negotiate_protocol")
-			throw new Error("OMP protocol negotiation failed");
+		await this.#ready.promise;
 	}
 
 	async prompt(message: string): Promise<void> {
@@ -66,12 +53,17 @@ export class RpcClient {
 
 	async request(command: RpcCommand): Promise<RpcResponse> {
 		if (this.#closed) throw new Error("RPC process is closed");
-		const id = command.id ?? `branchlight-${++this.#sequence}`;
-		const withId = { ...command, id } as RpcCommand;
+		if (!this.#readyReceived) throw new Error("RPC process is not ready");
+		const { id: commandId, type, ...payload } = command;
+		const id = commandId ?? `branchlight-${++this.#sequence}`;
+		if (this.#pending.has(id)) throw new Error(`RPC request id is already pending: ${id}`);
 		const pending = Promise.withResolvers<RpcResponse>();
-		this.#pending.set(id, { command: command.type, resolve: pending.resolve, reject: pending.reject });
+		this.#pending.set(id, { command: type, resolve: pending.resolve, reject: pending.reject });
 		try {
-			this.#child.stdin.write(`${JSON.stringify(withId)}\n`);
+			await this.#connection.send({
+				kind: "command",
+				command: { id, command: type, payload },
+			});
 		} catch (error) {
 			this.#pending.delete(id);
 			pending.reject(error instanceof Error ? error : new Error(String(error)));
@@ -81,84 +73,100 @@ export class RpcClient {
 
 	sendExtensionResponse(response: RpcExtensionUIResponse): void {
 		if (this.#closed) return;
-		this.#child.stdin.write(`${JSON.stringify(response)}\n`);
+		const { type, ...payload } = response;
+		void this.#connection
+			.send({ kind: "push", type, payload })
+			.catch(error => this.#fail(error instanceof Error ? error : new Error(String(error))));
 	}
 
-	async close(): Promise<void> {
-		if (this.#closed) return;
-		this.#closed = true;
-		const error = new Error("RPC process stopped");
-		for (const request of this.#pending.values()) request.reject(error);
-		this.#pending.clear();
-		this.#child.stdin.end();
+	close(): Promise<void> {
+		if (this.#closePromise) return this.#closePromise;
+		this.#closePromise = this.#close();
+		return this.#closePromise;
 	}
 
-	#onData(chunk: Buffer): void {
-		if (this.#closed) return;
-		this.#buffer = Buffer.concat([this.#buffer, chunk]);
-		while (true) {
-			const newline = this.#buffer.indexOf(10);
-			if (newline < 0) {
-				if (this.#buffer.byteLength >= MAX_RPC_FRAME_BYTES)
-					this.#fail(new Error("RPC physical frame exceeds 1 MiB"));
-				return;
-			}
-			if (newline + 1 > MAX_RPC_FRAME_BYTES) {
-				this.#fail(new Error("RPC physical frame exceeds 1 MiB"));
-				return;
-			}
-			const line = this.#buffer.subarray(0, newline);
-			this.#buffer = this.#buffer.subarray(newline + 1);
-			let value: unknown;
-			try {
-				value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(line));
-			} catch (error) {
-				this.#fail(new Error(`Invalid RPC JSON: ${error instanceof Error ? error.message : String(error)}`));
-				return;
-			}
-			try {
-				const decoded = this.#decoder.push(value);
-				if (decoded) this.#dispatch(decoded);
-			} catch (error) {
-				this.#fail(error instanceof Error ? error : new Error(String(error)));
-				return;
-			}
+	async #close(): Promise<void> {
+		if (!this.#closed) {
+			this.#closed = true;
+			const error = new Error("RPC process stopped");
+			for (const request of this.#pending.values()) request.reject(error);
+			this.#pending.clear();
 		}
+		await this.#connection.close();
+		await this.#readTask.catch(() => {});
 	}
 
-	#dispatch(frame: object): void {
-		const candidate = frame as Record<string, unknown>;
-		if (candidate.type === "ready") {
+	#dispatch(frame: OmpGrpcServerFrame): void {
+		if (!this.#readyReceived) {
+			if (frame.kind !== "ready") {
+				this.#fail(new Error("OMP gRPC stream did not begin with Ready"));
+				return;
+			}
 			if (
-				candidate.maxFrameBytes !== MAX_RPC_FRAME_BYTES ||
-				candidate.maxReassembledFrameBytes !== MAX_RPC_REASSEMBLED_BYTES
+				frame.protocolVersion !== OMP_GRPC_PROTOCOL_VERSION ||
+				frame.maxMessageBytes !== OMP_GRPC_MAX_MESSAGE_BYTES
 			) {
-				this.#readyReject?.(new Error("OMP advertised unsupported RPC limits"));
-			} else this.#readyResolve?.();
+				this.#fail(new Error("OMP advertised unsupported gRPC limits"));
+			} else {
+				this.#readyReceived = true;
+				this.#ready.resolve();
+			}
 			return;
 		}
-		if (candidate.type === "response") {
-			const id = typeof candidate.id === "string" ? candidate.id : undefined;
-			if (id) {
-				const pending = this.#pending.get(id);
+		if (frame.kind === "ready") {
+			this.#fail(new Error("OMP gRPC stream sent duplicate Ready"));
+			return;
+		}
+		if (frame.kind === "response") {
+			if (frame.id !== undefined) {
+				const pending = this.#pending.get(frame.id);
 				if (pending) {
-					this.#pending.delete(id);
-					pending.resolve(candidate as unknown as RpcResponse);
+					if (frame.command !== pending.command) {
+						this.#fail(
+							new Error(
+								`OMP gRPC response command mismatch for ${frame.id}: expected ${pending.command}, received ${frame.command}`,
+							),
+						);
+						return;
+					}
+					this.#pending.delete(frame.id);
+					pending.resolve({
+						type: "response",
+						id: frame.id,
+						command: frame.command,
+						success: frame.success,
+						...(frame.data !== undefined ? { data: frame.data } : {}),
+						...(frame.error !== undefined ? { error: frame.error } : {}),
+						...(frame.code !== undefined ? { code: frame.code } : {}),
+					});
 				}
 			}
 			return;
 		}
-		if (candidate.type === "extension_ui_request") {
-			for (const listener of this.#extensions) listener(candidate as unknown as RpcExtensionUIRequest);
+		const event = { ...frame.payload, type: frame.type };
+		if (event.type === "extension_ui_request") {
+			for (const listener of this.#extensions) listener(event as RpcExtensionUIRequest);
 			return;
 		}
-		for (const listener of this.#events) listener(frame);
+		for (const listener of this.#events) listener(event);
+	}
+
+	async #readFrames(): Promise<void> {
+		try {
+			for await (const frame of this.#connection.frames) {
+				if (this.#closed) return;
+				this.#dispatch(frame);
+			}
+			if (!this.#closed) this.#fail(new Error("OMP gRPC stream closed"));
+		} catch (error) {
+			this.#fail(error instanceof Error ? error : new Error(String(error)));
+		}
 	}
 
 	#fail(error: Error): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		this.#readyReject?.(error);
+		this.#ready.reject(error);
 		for (const request of this.#pending.values()) request.reject(error);
 		this.#pending.clear();
 		for (const listener of this.#events) listener({ type: "rpc_error", message: error.message });

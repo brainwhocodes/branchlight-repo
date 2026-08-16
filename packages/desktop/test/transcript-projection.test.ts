@@ -37,6 +37,8 @@ describe("TranscriptStore", () => {
 			detail: expect.stringContaining("[inline image omitted]"),
 		});
 		expect(progress?.detail).not.toContain(image.data);
+		if (!progress) throw new Error("expected image progress timeline item");
+		expect(projectTimeline("work", [progress])[0]?.detail).toContain("[inline image omitted]");
 
 		const complete = store.apply({
 			type: "tool_execution_end",

@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { onMount, tick } from "svelte";
-	import type { BrowserViewState } from "../../shared/contracts";
-
+	import type { BrowserBounds, BrowserViewState } from "../../shared/contracts";
 	export let paneId: string;
 	export let url: string;
+	export let workspaceId: string;
+	export let tabId: string;
 	export let active: boolean;
 	export let onCreated: (state: BrowserViewState) => void;
 	export let onError: (message: string) => void;
@@ -12,35 +13,64 @@
 	let mounted = false;
 	let created = false;
 	let frame = 0;
+	let lastSentBounds: BrowserBounds | undefined;
 
 	function scheduleBounds(): void {
 		if (!mounted || !created || !active || frame !== 0) return;
 		frame = requestAnimationFrame(() => {
 			frame = 0;
+			if (!mounted || !created || !active || !host) return;
 			const rect = host.getBoundingClientRect();
-			if (rect.width < 1 || rect.height < 1) return;
-			void window.branchlight.setBrowserBounds(paneId, {
-				x: rect.left,
-				y: rect.top,
-				width: rect.width,
-				height: rect.height,
-			});
+			if (
+				!Number.isFinite(rect.left) ||
+				!Number.isFinite(rect.top) ||
+				!Number.isFinite(rect.width) ||
+				!Number.isFinite(rect.height)
+			) {
+				return;
+			}
+			const x = Math.round(rect.left);
+			const y = Math.round(rect.top);
+			const width = Math.round(rect.width);
+			const height = Math.round(rect.height);
+			if (width < 1 || height < 1) return;
+
+			if (
+				lastSentBounds &&
+				lastSentBounds.x === x &&
+				lastSentBounds.y === y &&
+				lastSentBounds.width === width &&
+				lastSentBounds.height === height
+			) {
+				return;
+			}
+
+			const nextBounds = { x, y, width, height };
+			lastSentBounds = nextBounds;
+			void window.branchlight.setBrowserBounds(paneId, nextBounds);
 		});
 	}
 
-	$: if (active) scheduleBounds();
+	$: if (active) {
+		lastSentBounds = undefined;
+		scheduleBounds();
+	}
 
 	onMount(() => {
 		mounted = true;
 		const observer = new ResizeObserver(scheduleBounds);
 		observer.observe(host);
+
+		window.addEventListener("resize", scheduleBounds);
+		window.visualViewport?.addEventListener("resize", scheduleBounds);
+		window.visualViewport?.addEventListener("scroll", scheduleBounds);
+		document.addEventListener("transitionend", scheduleBounds);
+		document.addEventListener("animationend", scheduleBounds);
+
 		void (async () => {
 			try {
-				const state = await window.branchlight.createBrowser(paneId, url);
-				if (!mounted) {
-					void window.branchlight.closeBrowser(paneId);
-					return;
-				}
+				const state = await window.branchlight.createBrowser({ id: paneId, url, workspaceId, tabId });
+				if (!mounted) return;
 				created = true;
 				onCreated(state);
 				await tick();
@@ -53,8 +83,12 @@
 			mounted = false;
 			created = false;
 			observer.disconnect();
+			window.removeEventListener("resize", scheduleBounds);
+			window.visualViewport?.removeEventListener("resize", scheduleBounds);
+			window.visualViewport?.removeEventListener("scroll", scheduleBounds);
+			document.removeEventListener("transitionend", scheduleBounds);
+			document.removeEventListener("animationend", scheduleBounds);
 			if (frame !== 0) cancelAnimationFrame(frame);
-			void window.branchlight.closeBrowser(paneId);
 		};
 	});
 </script>
@@ -63,6 +97,7 @@
 	bind:this={host}
 	class="browser-surface"
 	class:is-active={active}
+	role="region"
 	aria-label="Browser content"
 	aria-hidden={!active}
 ></div>

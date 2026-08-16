@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
+import type { WorkspaceDocumentV1, WorkspacePrincipalV1 } from "@oh-my-pi/pi-wire";
+import type { SelectionAuthScope } from "@oh-my-pi/pi-workspace-runtime/selection";
 import { type BrowserWindow, dialog, shell } from "electron";
 import type {
 	AgentSettingOption,
@@ -13,9 +15,13 @@ import type {
 	FileDiffView,
 	InterruptMode,
 	ModelOption,
+	OAuthAccountSummaryView,
+	OAuthAccountsView,
+	OAuthProviderAccountsView,
 	OpenRouterModelRouting,
 	ProcessState,
 	QueueMode,
+	RuntimeReportView,
 	SessionRecordV1,
 	SessionSnapshot,
 	SlashCommand,
@@ -34,6 +40,7 @@ import {
 } from "./guards";
 import type { RpcClient } from "./rpc-client";
 import { RpcProcess } from "./rpc-process";
+import { RuntimeSupervisor } from "./runtime-supervisor";
 import { SessionRegistry } from "./session-registry";
 import { TranscriptStore } from "./transcript-store";
 
@@ -97,16 +104,26 @@ async function loadHistory(client: RpcClient): Promise<unknown[]> {
 		if (!Array.isArray(data.messages)) throw new Error("History page was invalid");
 		messages.push(...data.messages);
 		if (!data.nextCursor) return messages;
+
 		if (++pageCount > 10_000) throw new Error("History pagination exceeded its safety bound");
 		response = await client.request({ type: "get_messages_page", cursor: data.nextCursor, limit: 256 });
 	}
 	throw new Error(response?.error ?? "History page load failed");
 }
 
+function isWindowUsable(window?: BrowserWindow): boolean {
+	if (!window) return false;
+	if (typeof window.isDestroyed === "function" && window.isDestroyed()) return false;
+	if (window.webContents && typeof window.webContents.isDestroyed === "function" && window.webContents.isDestroyed())
+		return false;
+	return Boolean(window.webContents?.send);
+}
+
 export class DesktopHost {
 	#registry: SessionRegistry;
 	#window: BrowserWindow | undefined;
 	#runtimes = new Map<string, RuntimeSession>();
+	#supervisor: RuntimeSupervisor;
 	#eventQueues = new Map<string, BranchlightEvent[]>();
 	#eventTimers = new Map<string, TimerHandle>();
 	#warning: string | undefined;
@@ -121,16 +138,43 @@ export class DesktopHost {
 				process: RpcProcess;
 		  }
 		| undefined;
+	#document: WorkspaceDocumentV1 | undefined;
+	#principal: WorkspacePrincipalV1 | undefined;
 
 	constructor(userDataPath: string) {
 		this.#registry = new SessionRegistry(userDataPath);
+		this.#supervisor = new RuntimeSupervisor({
+			maxResident: 3,
+			idleTimeoutMs: 300_000,
+			sampleIntervalMs: 5_000,
+			onReport: report => this.#onRuntimeReport(report),
+		});
+	}
+
+	setWorkspaceAuthority(principal: WorkspacePrincipalV1, document: WorkspaceDocumentV1): void {
+		this.#principal = principal;
+		this.#document = document;
+	}
+
+	get principal(): WorkspacePrincipalV1 | undefined {
+		return this.#principal;
+	}
+
+	getDocument(): WorkspaceDocumentV1 | undefined {
+		return this.#document;
+	}
+
+	syncWithDocument(doc: WorkspaceDocumentV1): void {
+		this.#document = doc;
 	}
 
 	async load(): Promise<void> {
 		await this.#registry.load();
 		this.#warning = this.#registry.warning;
+		for (const record of this.#registry.value.sessions) this.#createRuntime(record);
 	}
-	setWindow(window: BrowserWindow): void {
+
+	setWindow(window: BrowserWindow | undefined): void {
 		this.#window = window;
 	}
 
@@ -139,6 +183,43 @@ export class DesktopHost {
 	}
 	async getAuthStatus(): Promise<AuthAccountView[]> {
 		return this.#authAccounts();
+	}
+
+	async getOAuthAccounts(): Promise<OAuthAccountsView> {
+		return this.#oauthAccounts();
+	}
+
+	async setOAuthAccountLock(providerInput: unknown, credentialInput: unknown): Promise<OAuthAccountsView> {
+		const providerId = assertAuthProvider(providerInput);
+		const credentialId = credentialInput === undefined ? undefined : assertCredentialId(credentialInput);
+		const response = await this.#withAuthClient(client =>
+			client.request({
+				type: "set_oauth_account_lock",
+				providerId,
+				...(credentialId === undefined ? {} : { credentialId }),
+			}),
+		);
+		if (!response.success) throw new Error(response.error ?? "OAuth account lock update failed");
+		return normalizeOAuthAccounts(response.data);
+	}
+
+	async setOAuthAccountFailover(enabledInput: unknown): Promise<OAuthAccountsView> {
+		if (typeof enabledInput !== "boolean") throw new TypeError("account failover must be boolean");
+		const response = await this.#withAuthClient(client =>
+			client.request({ type: "set_oauth_account_failover", enabled: enabledInput }),
+		);
+		if (!response.success) throw new Error(response.error ?? "OAuth account failover update failed");
+		return normalizeOAuthAccounts(response.data);
+	}
+
+	async removeOAuthAccount(providerInput: unknown, credentialInput: unknown): Promise<OAuthAccountsView> {
+		const providerId = assertAuthProvider(providerInput);
+		const credentialId = assertCredentialId(credentialInput);
+		const response = await this.#withAuthClient(client =>
+			client.request({ type: "remove_oauth_account", providerId, credentialId }),
+		);
+		if (!response.success) throw new Error(response.error ?? "OAuth account removal failed");
+		return normalizeOAuthAccounts(response.data);
 	}
 
 	async loginProvider(providerInput: unknown): Promise<AuthAccountView[]> {
@@ -210,35 +291,36 @@ export class DesktopHost {
 		};
 		const runtime = this.#createRuntime(record);
 		try {
-			await this.#startRuntime(runtime, false);
-			await this.#registry.create(runtime.record);
-			return this.#snapshot(runtime);
+			return await this.#supervisor.run(record.id, async () => {
+				await this.#registry.create(runtime.record);
+				return this.#snapshot(runtime);
+			});
 		} catch (error) {
+			await this.#supervisor.unregister(record.id);
 			this.#runtimes.delete(record.id);
 			throw error;
 		}
 	}
-
 	async openSession(id: unknown): Promise<SessionSnapshot> {
 		const record = this.#record(id);
-		await this.#registry.setActive(record.kind, record.id);
-		const runtime = this.#runtimes.get(record.id);
-		if (runtime) return this.#snapshot(runtime);
-		return { record, state: "stopped", timeline: [], subagents: [] };
+		return this.#supervisor.run(record.id, async () => {
+			this.#supervisor.touch(record.id);
+			await this.#registry.setActive(record.kind, record.id);
+			return this.#snapshot(this.#requiredRuntime(record.id));
+		});
 	}
-
 	async resume(id: unknown): Promise<SessionSnapshot> {
 		const record = this.#record(id);
-		const existing = this.#runtimes.get(record.id);
-		if (existing && existing.state !== "stopped" && existing.state !== "error") return this.#snapshot(existing);
-		const runtime = existing ?? this.#createRuntime(record);
-		await this.#startRuntime(runtime, true);
-		const lastOpenedAt = new Date().toISOString();
-		await this.#registry.update(record.id, { lastOpenedAt });
-		await this.#registry.setActive(record.kind, record.id);
-		runtime.record = { ...runtime.record, lastOpenedAt };
-		const snapshot = this.#snapshot(runtime);
-		return snapshot;
+		if (!record.sessionFile) throw new Error("No resumable OMP session file exists");
+		return this.#supervisor.run(record.id, async () => {
+			const runtime = this.#requiredRuntime(record.id);
+			const lastOpenedAt = new Date().toISOString();
+			await this.#registry.update(record.id, { lastOpenedAt });
+			await this.#registry.setActive(record.kind, record.id);
+			runtime.record = { ...runtime.record, lastOpenedAt };
+			this.#supervisor.touch(record.id);
+			return this.#snapshot(runtime);
+		});
 	}
 
 	async loadTimelinePage(idInput: unknown, beforeInput: unknown, limitInput: unknown): Promise<TimelinePage> {
@@ -266,37 +348,40 @@ export class DesktopHost {
 		return { ...item, textLoaded: true };
 	}
 	async getAvailableCommands(idInput: unknown): Promise<SlashCommand[]> {
-		const runtime = await this.#requireRunning(idInput);
-		if (runtime.commands.length > 0) return [...runtime.commands];
-		const response = await runtime.process.client?.request({ type: "get_available_commands" });
-		if (!response?.success) throw new Error(response?.error ?? "Slash commands are unavailable");
-		const data = isRecord(response.data) ? response.data : undefined;
-		runtime.commands = normalizeSlashCommands(data?.commands);
-		return [...runtime.commands];
+		return this.#runWithRuntime(idInput, async (runtime, client) => {
+			if (runtime.commands.length > 0) return [...runtime.commands];
+			const response = await client.request({ type: "get_available_commands" });
+			if (!response.success) throw new Error(response.error ?? "Slash commands are unavailable");
+			const data = isRecord(response.data) ? response.data : undefined;
+			runtime.commands = normalizeSlashCommands(data?.commands);
+			return [...runtime.commands];
+		});
 	}
 
 	async getAvailableModels(idInput: unknown): Promise<ModelOption[]> {
-		const runtime = await this.#requireRunning(idInput);
-		if (runtime.models) return [...runtime.models];
-		const response = await runtime.process.client?.request({ type: "get_available_models" });
-		if (!response?.success) throw new Error(response?.error ?? "Models are unavailable");
-		const data = isRecord(response.data) ? response.data : undefined;
-		const models = Array.isArray(data?.models)
-			? data.models.map(toModelOption).filter((model): model is ModelOption => model !== undefined)
-			: [];
-		runtime.models = models;
-		return [...models];
+		return this.#runWithRuntime(idInput, async (runtime, client) => {
+			if (runtime.models) return [...runtime.models];
+			const response = await client.request({ type: "get_available_models" });
+			if (!response.success) throw new Error(response.error ?? "Models are unavailable");
+			const data = isRecord(response.data) ? response.data : undefined;
+			const models = Array.isArray(data?.models)
+				? data.models.map(toModelOption).filter((model): model is ModelOption => model !== undefined)
+				: [];
+			runtime.models = models;
+			return [...models];
+		});
 	}
 	async getOpenRouterModelRouting(idInput: unknown, modelInput: unknown): Promise<OpenRouterModelRouting> {
-		const runtime = await this.#requireRunning(idInput);
 		const modelId = assertBoundedText(modelInput, "model").trim();
 		if (!modelId) throw new TypeError("invalid model");
-		const response = await runtime.process.client?.request({
-			type: "get_openrouter_model_routing",
-			modelId,
+		return this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({
+				type: "get_openrouter_model_routing",
+				modelId,
+			});
+			if (!response.success) throw new Error(response.error ?? "OpenRouter routes are unavailable");
+			return normalizeOpenRouterModelRouting(response.data);
 		});
-		if (!response?.success) throw new Error(response?.error ?? "OpenRouter routes are unavailable");
-		return normalizeOpenRouterModelRouting(response.data);
 	}
 
 	async setOpenRouterProviderEnabled(
@@ -305,173 +390,274 @@ export class DesktopHost {
 		providerInput: unknown,
 		enabledInput: unknown,
 	): Promise<OpenRouterModelRouting> {
-		const runtime = await this.#requireRunning(idInput);
 		const modelId = assertBoundedText(modelInput, "model").trim();
 		const providerId = assertBoundedText(providerInput, "provider").trim();
 		if (!modelId || !providerId || typeof enabledInput !== "boolean") {
 			throw new TypeError("invalid OpenRouter routing preference");
 		}
-		const response = await runtime.process.client?.request({
-			type: "set_openrouter_provider_enabled",
-			modelId,
-			providerId,
-			enabled: enabledInput,
+		return this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({
+				type: "set_openrouter_provider_enabled",
+				modelId,
+				providerId,
+				enabled: enabledInput,
+			});
+			if (!response.success) throw new Error(response.error ?? "OpenRouter route could not be updated");
+			return normalizeOpenRouterModelRouting(response.data);
 		});
-		if (!response?.success) throw new Error(response?.error ?? "OpenRouter route could not be updated");
-		return normalizeOpenRouterModelRouting(response.data);
 	}
 
 	async stop(id: unknown): Promise<SessionSnapshot> {
 		const record = this.#record(id);
-		const runtime = this.#runtimes.get(record.id);
-		if (!runtime) return { record, state: "stopped", timeline: [], subagents: [] };
-		await runtime.process.stop();
-		runtime.state = "stopped";
-		this.#emitUrgent({ sessionId: record.id, type: "session", state: "stopped" });
-		return this.#snapshot(runtime);
+		await this.#supervisor.stop(record.id);
+		return this.#snapshot(this.#requiredRuntime(record.id));
 	}
 
 	async rename(id: unknown, titleInput: unknown): Promise<SessionSnapshot> {
 		const record = this.#record(id);
 		const title = assertSessionName(titleInput);
-		const runtime = this.#runtimes.get(record.id);
-		if (runtime?.process.client) {
-			const response = await runtime.process.client.request({ type: "set_session_name", name: title });
-			if (!response.success) throw new Error(response.error);
+		const runtime = this.#requiredRuntime(record.id);
+		if (runtime.state === "ready" || runtime.state === "running") {
+			await this.#supervisor.run(record.id, async () => {
+				const client = runtime.process.client;
+				if (!client) throw new Error("OMP is not ready");
+				const response = await client.request({ type: "set_session_name", name: title });
+				if (!response.success) throw new Error(response.error);
+			});
 		}
 		await this.#registry.update(record.id, { title });
-		if (runtime) runtime.record = { ...runtime.record, title };
-		return runtime
-			? this.#snapshot(runtime)
-			: { record: { ...record, title }, state: "stopped", timeline: [], subagents: [] };
+		runtime.record = { ...runtime.record, title };
+		return this.#snapshot(runtime);
 	}
 
 	async prompt(id: unknown, textInput: unknown): Promise<void> {
 		const text = assertBoundedText(textInput, "prompt");
-		const runtime = await this.#requireRunning(id);
-		await runtime.process.client?.prompt(text);
+		await this.#runWithRuntime(id, async (_runtime, client) => client.prompt(text));
 	}
+	resolveSelectionScope(paneId: string, targetAgentId?: string, documentEpoch?: number): SelectionAuthScope {
+		if (!paneId || paneId.trim().length === 0) {
+			throw new Error("Pane ID is required for selection scope");
+		}
 
+		if (!targetAgentId || targetAgentId.trim().length === 0) {
+			throw new Error("Explicit target agent ID is required for selection authorization");
+		}
+
+		const doc = this.#document;
+		const principal = this.#principal;
+
+		if (!doc || !principal) {
+			throw new Error("No authenticated workspace authority found for selection");
+		}
+
+		// 1. Exact agent
+		const agent = doc.agents.find(a => a.id === targetAgentId);
+		if (!agent) {
+			throw new Error(`Target agent '${targetAgentId}' not found in authenticated workspace authority`);
+		}
+		// 2. Active session
+		if (!agent.sessionId) {
+			throw new Error(`Target agent '${targetAgentId}' has no active session`);
+		}
+		const session = doc.sessions.find(s => s.id === agent.sessionId);
+		if (!session) {
+			throw new Error(`Session '${agent.sessionId}' for agent '${targetAgentId}' not found in authority document`);
+		}
+
+		// 3. Session location
+		const location = doc.locations.find(l => l.id === session.locationId);
+		if (!location) {
+			throw new Error(
+				`Location '${session.locationId}' for session '${session.id}' not found in authority document`,
+			);
+		}
+
+		// 4. Requested pane
+		const pane = doc.panes.find(p => p.id === paneId);
+		if (!pane) {
+			throw new Error(`Pane '${paneId}' not found in authority document`);
+		}
+		if (pane.kind !== "browser") {
+			throw new Error(`Pane '${paneId}' is a ${pane.kind} pane, not a browser pane`);
+		}
+
+		// 5. Owning tab
+		const tab = doc.tabs.find(t => t.id === pane.tabId);
+		if (!tab) {
+			throw new Error(`Tab '${pane.tabId}' for pane '${paneId}' not found in authority document`);
+		}
+
+		// 6. Owning workspace from the tab
+		const workspace = doc.workspaces.find(w => w.id === tab.workspaceId);
+		if (!workspace) {
+			throw new Error(`Workspace '${tab.workspaceId}' for tab '${tab.id}' not found in authority document`);
+		}
+
+		// 7. Same location and generation verification
+		if (tab.locationId !== location.id) {
+			throw new Error(`Pane location '${tab.locationId}' does not match agent location '${location.id}'`);
+		}
+		if (tab.generation !== location.lifecycle.generation) {
+			throw new Error(
+				`Tab generation ${tab.generation} does not match active location generation ${location.lifecycle.generation}`,
+			);
+		}
+		// 8. Exact open browser entity verification
+		const browser = doc.browsers.find(
+			b =>
+				b.id === pane.entityId &&
+				b.paneId === pane.id &&
+				b.locationId === location.id &&
+				b.generation === location.lifecycle.generation &&
+				(b.status === "opening" || b.status === "open"),
+		);
+		if (!browser) {
+			throw new Error(`Open browser entity '${pane.entityId}' for pane '${paneId}' not found in authority document`);
+		}
+
+		if (typeof documentEpoch !== "number" || !Number.isSafeInteger(documentEpoch) || documentEpoch <= 0) {
+			throw new Error("Valid positive documentEpoch is required for selection scope");
+		}
+
+		return {
+			principalId: principal.id,
+			workspaceId: workspace.id,
+			tabId: tab.id,
+			paneId: pane.id,
+			documentEpoch,
+			locationGeneration: location.lifecycle.generation,
+			locationId: location.id,
+			agentId: agent.id,
+			sessionId: session.id,
+		};
+	}
 	async steer(id: unknown, textInput: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
-		const response = await runtime.process.client?.request({
-			type: "steer",
-			message: assertBoundedText(textInput, "steer"),
+		const message = assertBoundedText(textInput, "steer");
+		await this.#runWithRuntime(id, async (_runtime, client) => {
+			const response = await client.request({ type: "steer", message });
+			if (!response.success) throw new Error(response.error);
 		});
-		if (response && !response.success) throw new Error(response.error);
 	}
 
 	async queueFollowUp(id: unknown, textInput: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
-		const response = await runtime.process.client?.request({
-			type: "follow_up",
-			message: assertBoundedText(textInput, "follow-up"),
+		const message = assertBoundedText(textInput, "follow-up");
+		await this.#runWithRuntime(id, async (_runtime, client) => {
+			const response = await client.request({ type: "follow_up", message });
+			if (!response.success) throw new Error(response.error);
 		});
-		if (response && !response.success) throw new Error(response.error);
 	}
 
 	async abort(id: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
-		const response = await runtime.process.client?.request({ type: "abort" });
-		if (response && !response.success) throw new Error(response.error);
+		await this.#runWithRuntime(id, async (_runtime, client) => {
+			const response = await client.request({ type: "abort" });
+			if (!response.success) throw new Error(response.error);
+		});
 	}
 
-	async setModel(id: unknown, providerInput: unknown, modelInput: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
-		const provider = assertBoundedText(providerInput, "provider").trim();
-		const modelId = assertBoundedText(modelInput, "model").trim();
-		if (!provider || !modelId) throw new TypeError("invalid model");
-		const response = await runtime.process.client?.request({
-			type: "set_model",
-			provider,
-			modelId,
+	async setModel(id: unknown, providerInput: unknown, modelIdInput: unknown): Promise<void> {
+		const provider = assertBoundedText(providerInput, "model provider");
+		const modelId = assertBoundedText(modelIdInput, "model id");
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const response = await client.request({
+				type: "set_model",
+				provider,
+				modelId,
+			});
+			if (!response.success) throw new Error(response.error);
+			runtime.model = `${provider}/${modelId}`;
 		});
-		if (response && !response.success) throw new Error(response.error);
-		const selected = toModelOption(response?.data);
-		runtime.model = selected ? `${selected.provider}/${selected.id}` : `${provider}/${modelId}`;
 	}
 
 	async setThinking(id: unknown, levelInput: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
-		const level = assertThinkingLevel(levelInput);
-		const response = await runtime.process.client?.request({
-			type: "set_thinking_level",
-			level,
-		});
-		if (response && !response.success) throw new Error(response.error);
-		runtime.thinkingLevel = level;
+		return this.setThinkingLevel(id, levelInput);
 	}
 
+	async setThinkingLevel(id: unknown, levelInput: unknown): Promise<void> {
+		const level = assertThinkingLevel(levelInput);
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const response = await client.request({
+				type: "set_thinking_level",
+				level,
+			});
+			if (!response.success) throw new Error(response.error);
+			runtime.thinkingLevel = level;
+		});
+	}
 	async setFastMode(id: unknown, enabled: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
 		if (typeof enabled !== "boolean") throw new TypeError("invalid fast mode value");
-		const response = await runtime.process.client?.request({ type: "set_fast_mode", enabled });
-		if (response && !response.success) throw new Error(response.error);
-		const data = isRecord(response?.data) ? response.data : undefined;
-		runtime.fastMode = typeof data?.enabled === "boolean" ? data.enabled : enabled;
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const response = await client.request({ type: "set_fast_mode", enabled });
+			if (!response.success) throw new Error(response.error);
+			const data = isRecord(response.data) ? response.data : undefined;
+			runtime.fastMode = typeof data?.enabled === "boolean" ? data.enabled : enabled;
+		});
 	}
 
 	async setQueueMode(id: unknown, kindInput: unknown, modeInput: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
 		if (kindInput !== "steering" && kindInput !== "follow-up") throw new TypeError("invalid queue mode kind");
 		const mode = assertQueueMode(modeInput);
-		const response = await runtime.process.client?.request({
-			type: kindInput === "steering" ? "set_steering_mode" : "set_follow_up_mode",
-			mode,
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const response = await client.request({
+				type: kindInput === "steering" ? "set_steering_mode" : "set_follow_up_mode",
+				mode,
+			});
+			if (!response.success) throw new Error(response.error);
+			if (kindInput === "steering") runtime.steeringMode = mode;
+			else runtime.followUpMode = mode;
 		});
-		if (response && !response.success) throw new Error(response.error);
-		if (kindInput === "steering") runtime.steeringMode = mode;
-		else runtime.followUpMode = mode;
 	}
 
 	async setInterruptMode(id: unknown, modeInput: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
 		const mode = assertInterruptMode(modeInput);
-		const response = await runtime.process.client?.request({ type: "set_interrupt_mode", mode });
-		if (response && !response.success) throw new Error(response.error);
-		runtime.interruptMode = mode;
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const response = await client.request({ type: "set_interrupt_mode", mode });
+			if (!response.success) throw new Error(response.error);
+			runtime.interruptMode = mode;
+		});
 	}
 
 	async setAutoCompaction(id: unknown, enabled: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
 		if (typeof enabled !== "boolean") throw new TypeError("invalid auto-compaction value");
-		const response = await runtime.process.client?.request({ type: "set_auto_compaction", enabled });
-		if (response && !response.success) throw new Error(response.error);
-		runtime.autoCompactionEnabled = enabled;
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const response = await client.request({ type: "set_auto_compaction", enabled });
+			if (!response.success) throw new Error(response.error);
+			runtime.autoCompactionEnabled = enabled;
+		});
 	}
 
 	async setAutoRetry(id: unknown, enabled: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(id);
 		if (typeof enabled !== "boolean") throw new TypeError("invalid auto-retry value");
-		const response = await runtime.process.client?.request({ type: "set_auto_retry", enabled });
-		if (response && !response.success) throw new Error(response.error);
-		runtime.autoRetryEnabled = enabled;
+		await this.#runWithRuntime(id, async (runtime, client) => {
+			const response = await client.request({ type: "set_auto_retry", enabled });
+			if (!response.success) throw new Error(response.error);
+			runtime.autoRetryEnabled = enabled;
+		});
 	}
 
 	async extensionResponse(idInput: unknown, responseInput: unknown): Promise<void> {
-		const runtime = await this.#requireRunning(idInput);
 		if (typeof responseInput !== "object" || responseInput === null || !("id" in responseInput))
 			throw new TypeError("invalid extension response");
 		const response = responseInput as Record<string, unknown>;
 		if (typeof response.id !== "string") throw new TypeError("invalid extension response id");
-		const expected = runtime.outstandingExtensions.get(response.id);
-		if (!expected) throw new Error("stale extension response");
-		if (response.method !== undefined && response.method !== expected)
-			throw new Error("extension response method mismatch");
 		if (response.value !== undefined) assertBoundedText(response.value, "extension response");
 		if (response.confirmed !== undefined && typeof response.confirmed !== "boolean")
 			throw new TypeError("invalid extension confirmation");
 		if (response.cancelled !== undefined && response.cancelled !== true)
 			throw new TypeError("invalid extension cancellation");
-		runtime.outstandingExtensions.delete(response.id);
-		runtime.process.client?.sendExtensionResponse({
-			...response,
-			type: "extension_ui_response",
-		} as RpcExtensionUIResponse);
+		await this.#runWithRuntime(idInput, (runtime, client) => {
+			const expected = runtime.outstandingExtensions.get(response.id as string);
+			if (!expected) throw new Error("stale extension response");
+			if (response.method !== undefined && response.method !== expected)
+				throw new Error("extension response method mismatch");
+			runtime.outstandingExtensions.delete(response.id as string);
+			client.sendExtensionResponse({
+				...response,
+				type: "extension_ui_response",
+			} as RpcExtensionUIResponse);
+		});
 	}
 
 	async getSubagentMessages(idInput: unknown, subagentIdInput: unknown, fromByteInput: unknown): Promise<unknown> {
-		const runtime = await this.#requireRunning(idInput);
 		if (
 			typeof subagentIdInput !== "string" ||
 			typeof fromByteInput !== "number" ||
@@ -479,36 +665,37 @@ export class DesktopHost {
 			fromByteInput < 0
 		)
 			throw new TypeError("invalid subagent transcript request");
-		const response = await runtime.process.client?.request({
-			type: "get_subagent_messages",
-			subagentId: subagentIdInput,
-			fromByte: fromByteInput,
+		return this.#runWithRuntime(idInput, async (_runtime, client) => {
+			const response = await client.request({
+				type: "get_subagent_messages",
+				subagentId: subagentIdInput,
+				fromByte: fromByteInput,
+			});
+			if (!response.success) throw new Error(response.error ?? "subagent transcript unavailable");
+			return response.data;
 		});
-		if (!response?.success) throw new Error(response?.error ?? "subagent transcript unavailable");
-		return response.data;
 	}
 	async loadFileDiff(idInput: unknown, targetInput: unknown): Promise<FileDiffView> {
 		const target = assertBoundedText(targetInput, "file diff path").trim();
 		if (!target || target.length > 4_096) throw new TypeError("invalid file diff path");
-		const runtime = await this.#requireRunning(idInput);
-		const key = fileDiffCacheKey(target);
-		const cached = runtime.fileDiffCache.get(key);
-		if (cached && cached.expiresAt > Date.now()) return cached.request;
+		return this.#runWithRuntime(idInput, async (runtime, client) => {
+			const key = fileDiffCacheKey(target);
+			const cached = runtime.fileDiffCache.get(key);
+			if (cached && cached.expiresAt > Date.now()) return cached.request;
 
-		const client = runtime.process.client;
-		if (!client) throw new Error("OMP is not ready");
-		const request = client.request({ type: "get_file_diff", path: target }).then(response => {
-			if (!response.success) throw new Error(response.error ?? "File diff is unavailable");
-			return normalizeFileDiff(response.data);
+			const request = client.request({ type: "get_file_diff", path: target }).then(response => {
+				if (!response.success) throw new Error(response.error ?? "File diff is unavailable");
+				return normalizeFileDiff(response.data);
+			});
+			const entry = { expiresAt: Date.now() + FILE_DIFF_CACHE_TTL_MS, request };
+			runtime.fileDiffCache.set(key, entry);
+			try {
+				return await request;
+			} catch (error) {
+				if (runtime.fileDiffCache.get(key) === entry) runtime.fileDiffCache.delete(key);
+				throw error;
+			}
 		});
-		const entry = { expiresAt: Date.now() + FILE_DIFF_CACHE_TTL_MS, request };
-		runtime.fileDiffCache.set(key, entry);
-		try {
-			return await request;
-		} catch (error) {
-			if (runtime.fileDiffCache.get(key) === entry) runtime.fileDiffCache.delete(key);
-			throw error;
-		}
 	}
 
 	async openWorkspaceFile(idInput: unknown, targetInput: unknown): Promise<void> {
@@ -528,14 +715,14 @@ export class DesktopHost {
 	}
 
 	async stopAll(): Promise<void> {
-		await Promise.all([...this.#runtimes.values()].map(runtime => runtime.process.stop().catch(() => {})));
+		await this.#supervisor.close();
 	}
 	async close(): Promise<void> {
 		this.#authPrompt = undefined;
 		const authProcess = this.#authProcess;
 		this.#authProcess = undefined;
 		this.#authClient = undefined;
-		await authProcess?.stop().catch(() => {});
+		await Promise.all([this.#supervisor.close(), authProcess?.stop().catch(() => {})]);
 	}
 
 	#createRuntime(record: SessionRecordV1): RuntimeSession {
@@ -549,22 +736,47 @@ export class DesktopHost {
 		runtime.fileDiffCache = new Map();
 		runtime.process = new RpcProcess({
 			cwd: record.cwd,
-			sessionFile: record.sessionFile || undefined,
 			onEvent: event => this.#onEvent(runtime, event),
 			onExtension: request => this.#onExtension(runtime, request),
 			onState: (state, error) => {
 				runtime.state = state;
-				this.#emitUrgent({ sessionId: runtime.record.id, type: "session", state, message: error });
+				if (this.#runtimes.get(runtime.record.id) !== runtime) return;
+				this.#supervisor.updateState(runtime.record.id, state);
+				if (error) {
+					this.#emitUrgent({
+						sessionId: runtime.record.id,
+						type: "session",
+						state,
+						runtime: this.#supervisor.report(runtime.record.id),
+						message: error,
+					});
+				}
 			},
 		});
 		this.#runtimes.set(record.id, runtime);
+		this.#supervisor.register({
+			id: record.id,
+			start: async () => {
+				try {
+					await this.#startRuntime(runtime);
+				} catch (error) {
+					if (runtime.process.state !== "stopping" && runtime.process.state !== "stopped") {
+						await runtime.process.stop().catch(() => {});
+					}
+					throw error;
+				}
+			},
+			stop: async () => {
+				await runtime.process.stop();
+				runtime.outstandingExtensions.clear();
+			},
+			sample: () => runtime.process.sample(),
+		});
 		return runtime;
 	}
 
-	async #startRuntime(runtime: RuntimeSession, resumed: boolean): Promise<void> {
-		if (runtime.state === "starting" || runtime.state === "ready" || runtime.state === "running") return;
-		if (resumed && !runtime.record.sessionFile) throw new Error("No resumable OMP session file exists");
-		const client = await runtime.process.start();
+	async #startRuntime(runtime: RuntimeSession): Promise<void> {
+		const client = await runtime.process.start(runtime.record.sessionFile || undefined);
 		const state = await client.request({ type: "get_state" });
 		if (!state.success || state.command !== "get_state")
 			throw new Error(
@@ -603,18 +815,25 @@ export class DesktopHost {
 		const commands = await client.request({ type: "set_subagent_subscription", level: "progress" });
 		if (!commands.success) throw new Error(commands.error ?? "Subagent subscription failed");
 		await this.#registry.update(runtime.record.id, runtime.record);
-		this.#emitUrgent({ sessionId: runtime.record.id, type: "session", state: runtime.state });
 		this.#emitUrgent({ sessionId: runtime.record.id, type: "timeline" });
 	}
 
-	async #requireRunning(idInput: unknown): Promise<RuntimeSession> {
+	async #runWithRuntime<T>(
+		idInput: unknown,
+		operation: (runtime: RuntimeSession, client: RpcClient) => T | Promise<T>,
+	): Promise<T> {
 		const record = this.#record(idInput);
-		let runtime = this.#runtimes.get(record.id);
-		if (!runtime || runtime.state === "stopped" || runtime.state === "error") {
-			runtime = runtime ?? this.#createRuntime(record);
-			await this.#startRuntime(runtime, Boolean(record.sessionFile));
-		}
-		if (!runtime.process.client) throw new Error("OMP is not ready");
+		const runtime = this.#requiredRuntime(record.id);
+		return this.#supervisor.run(record.id, () => {
+			const client = runtime.process.client;
+			if (!client) throw new Error("OMP is not ready");
+			return operation(runtime, client);
+		});
+	}
+
+	#requiredRuntime(id: string): RuntimeSession {
+		const runtime = this.#runtimes.get(id);
+		if (!runtime) throw new Error(`Runtime ${id} is not registered`);
 		return runtime;
 	}
 
@@ -649,9 +868,15 @@ export class DesktopHost {
 			tokensPerSecond: runtime.tokensPerSecond,
 			queuedMessageCount: runtime.queuedMessageCount,
 			todoPhases: runtime.todoPhases,
+			runtime: this.#supervisor.report(runtime.record.id),
 		};
 	}
 
+	async #oauthAccounts(): Promise<OAuthAccountsView> {
+		const response = await this.#withAuthClient(client => client.request({ type: "get_oauth_accounts" }));
+		if (!response.success) throw new Error(response.error ?? "OAuth accounts are unavailable");
+		return normalizeOAuthAccounts(response.data);
+	}
 	async #authAccounts(): Promise<AuthAccountView[]> {
 		const fallback: AuthAccountView = {
 			provider: "openai-codex",
@@ -694,9 +919,13 @@ export class DesktopHost {
 	async #withSettingsClient<T>(idInput: unknown, operation: (client: RpcClient) => Promise<T>): Promise<T> {
 		if (idInput !== undefined) {
 			const record = this.#record(idInput);
-			const runtime = this.#runtimes.get(record.id);
-			if (runtime?.process.client && (runtime.state === "ready" || runtime.state === "running")) {
-				return operation(runtime.process.client);
+			const runtime = this.#requiredRuntime(record.id);
+			if (runtime.state === "ready" || runtime.state === "running") {
+				return this.#supervisor.run(record.id, () => {
+					const client = runtime.process.client;
+					if (!client) throw new Error("OMP is not ready");
+					return operation(client);
+				});
 			}
 		}
 		return this.#withAuthClient(operation);
@@ -766,10 +995,23 @@ export class DesktopHost {
 	}
 
 	#emitAuth(event: AuthEvent): void {
-		this.#window?.webContents.send("branchlight:auth", event);
+		if (isWindowUsable(this.#window)) {
+			this.#window?.webContents.send("branchlight:auth", event);
+		}
+	}
+
+	#onRuntimeReport(report: RuntimeReportView): void {
+		if (!this.#runtimes.has(report.id)) return;
+		this.#emitUrgent({
+			sessionId: report.id,
+			type: "session",
+			state: report.processState,
+			runtime: report,
+		});
 	}
 
 	#onEvent(runtime: RuntimeSession, event: unknown): void {
+		this.#supervisor.touch(runtime.record.id);
 		const frame = event as Record<string, unknown>;
 		if (frame.type === "subagent_lifecycle" || frame.type === "subagent_progress") {
 			this.#updateSubagents(runtime, frame);
@@ -876,6 +1118,7 @@ export class DesktopHost {
 	}
 
 	#onExtension(runtime: RuntimeSession, request: RpcExtensionUIRequest): void {
+		this.#supervisor.touch(runtime.record.id);
 		if (request.method === "cancel") {
 			if (request.targetId) runtime.outstandingExtensions.delete(request.targetId);
 			this.#emitUrgent({
@@ -933,7 +1176,9 @@ export class DesktopHost {
 		const queue = this.#eventQueues.get(sessionId);
 		if (!queue || queue.length === 0) return;
 		this.#eventQueues.delete(sessionId);
-		for (const event of queue) this.#window?.webContents.send("branchlight:event", event);
+		if (isWindowUsable(this.#window)) {
+			for (const event of queue) this.#window?.webContents.send("branchlight:event", event);
+		}
 	}
 }
 function expectsExtensionResponse(method: RpcExtensionUIRequest["method"]): boolean {
@@ -1197,6 +1442,68 @@ function normalizeAuthAccounts(value: unknown): AuthAccountView[] {
 	);
 }
 
+function normalizeOAuthAccounts(value: unknown): OAuthAccountsView {
+	const data = isRecord(value) ? value : undefined;
+	const providers: OAuthProviderAccountsView[] = [];
+	const seenProviders = new Set<string>();
+	if (!Array.isArray(data?.providers)) return { providers };
+	for (const candidate of data.providers.slice(0, 1_000)) {
+		if (
+			!isRecord(candidate) ||
+			typeof candidate.id !== "string" ||
+			!/^[a-z0-9][a-z0-9._-]{0,159}$/i.test(candidate.id) ||
+			typeof candidate.name !== "string" ||
+			candidate.name.length === 0 ||
+			candidate.name.length > 512 ||
+			seenProviders.has(candidate.id)
+		)
+			continue;
+		seenProviders.add(candidate.id);
+		const accounts: OAuthAccountSummaryView[] = [];
+		const seenCredentials = new Set<number>();
+		if (Array.isArray(candidate.accounts)) {
+			for (const account of candidate.accounts.slice(0, 1_000)) {
+				if (
+					!isRecord(account) ||
+					!Number.isSafeInteger(account.credentialId) ||
+					(account.credentialId as number) < 0 ||
+					seenCredentials.has(account.credentialId as number)
+				)
+					continue;
+				const optionalText = (key: string): string | undefined => {
+					const value = account[key];
+					return typeof value === "string" && value.length <= 512 ? value : undefined;
+				};
+				const credentialId = account.credentialId as number;
+				seenCredentials.add(credentialId);
+				accounts.push({
+					credentialId,
+					email: optionalText("email"),
+					accountId: optionalText("accountId"),
+					orgId: optionalText("orgId"),
+					orgName: optionalText("orgName"),
+					projectId: optionalText("projectId"),
+					active: account.active === true,
+					locked: account.locked === true,
+					lockable: account.lockable === true,
+				});
+			}
+		}
+		const lockedCredentialId =
+			Number.isSafeInteger(candidate.lockedCredentialId) && (candidate.lockedCredentialId as number) >= 0
+				? (candidate.lockedCredentialId as number)
+				: undefined;
+		providers.push({
+			id: candidate.id,
+			name: candidate.name,
+			available: candidate.available === true,
+			failover: candidate.failover === true,
+			lockedCredentialId,
+			accounts,
+		});
+	}
+	return { providers };
+}
 function normalizeAgentSettings(value: unknown): AgentSettingView[] {
 	if (!Array.isArray(value)) return [];
 	return value
@@ -1288,4 +1595,9 @@ function assertAuthProvider(value: unknown): string {
 	if (typeof value !== "string" || !/^[a-z0-9][a-z0-9._-]{0,159}$/i.test(value))
 		throw new TypeError("Unsupported OAuth provider");
 	return value;
+}
+
+function assertCredentialId(value: unknown): number {
+	if (!Number.isSafeInteger(value) || (value as number) < 0) throw new TypeError("invalid OAuth credential id");
+	return value as number;
 }

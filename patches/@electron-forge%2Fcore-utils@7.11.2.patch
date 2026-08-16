@@ -1,0 +1,12 @@
+diff --git a/dist/electron-version.js b/dist/electron-version.js
+--- a/dist/electron-version.js
++++ b/dist/electron-version.js
+@@ -16,7 +16,7 @@ function findElectronDep(dep) {
+ }
+ async function findAncestorNodeModulesPath(dir, packageName) {
+     d('Looking for a lock file to indicate the root of the repo');
+-    const lockPath = await (0, find_up_1.default)(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml'], { cwd: dir, type: 'file' });
++    const lockPath = await (0, find_up_1.default)(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb'], { cwd: dir, type: 'file' });
+     if (lockPath) {
+         d(`Found lock file: ${lockPath}`);
+         const nodeModulesPath = node_path_1.default.join(node_path_1.default.dirname(lockPath), 'node_modules', packageName);

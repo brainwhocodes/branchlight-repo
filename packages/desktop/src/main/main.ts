@@ -1,58 +1,253 @@
+import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { findFreeTcpPort } from "@oh-my-pi/pi-utils/net";
+import type { WorkspaceCommandV1, WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire";
+import { ensureWorkspaceRuntime, type WorkspaceRuntimeDescriptor } from "@oh-my-pi/pi-workspace-runtime/bootstrap";
+import type { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
 import { app, BrowserWindow, ipcMain, net, protocol, session } from "electron";
+import { AppSettingsStore } from "./app-settings";
+import { defaultWorkspacePath, ompExecutablePath, runtimeRootDir } from "./backend-path";
 import { DesktopHost } from "./desktop-host";
 import { safeExternalUrl } from "./guards";
+import { shutdownDesktopServices } from "./shutdown";
 import { WorkspaceHost } from "./workspace-host";
 
-const DEV_SERVER = typeof MAIN_WINDOW_VITE_DEV_SERVER_URL === "string" ? MAIN_WINDOW_VITE_DEV_SERVER_URL : undefined;
+const DEV_SERVER =
+	typeof MAIN_WINDOW_VITE_DEV_SERVER_URL === "string" ? new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL) : undefined;
 const CONTENT_SECURITY_POLICY =
 	"default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 let mainWindow: BrowserWindow | undefined;
 let host: DesktopHost | undefined;
-let workspace: WorkspaceHost | undefined;
+let appSettingsStore: AppSettingsStore | undefined;
 let quitting = false;
+let workspace: WorkspaceHost | undefined;
+let runtimeDescriptor: WorkspaceRuntimeDescriptor | undefined;
+let runtimeClient: WorkspaceClient | undefined;
 
+const DEFAULT_WORKSPACE_ID = "workspace-default";
+const DEFAULT_LOCATION_ID = "location-default";
+
+async function executeBootstrapCommand(
+	client: WorkspaceClient,
+	command: WorkspaceCommandV1,
+): Promise<WorkspaceDocumentV1> {
+	const result = await client.executeCommandWithRetry(() => command);
+	if (result.status === "accepted" || result.status === "duplicate") return result.document;
+	throw new Error(`Workspace bootstrap command ${command.type} failed: ${result.error?.message ?? result.status}`);
+}
+
+async function ensureDefaultWorkspace(client: WorkspaceClient): Promise<void> {
+	let document = client.document ?? (await client.getDocument());
+	if (document.workspaces.length === 0) {
+		document = await executeBootstrapCommand(client, {
+			version: 1,
+			commandId: "workspace-bootstrap-default",
+			workspaceId: DEFAULT_WORKSPACE_ID,
+			expectedRevision: document.revision,
+			issuedAt: 1,
+			type: "workspace.create",
+			payload: {
+				locationId: DEFAULT_LOCATION_ID,
+				locationName: "Local",
+				address: { kind: "local", path: defaultWorkspacePath() },
+				name: "Workspace",
+			},
+		});
+	}
+
+	const workspaceId = document.workspaces[0]?.id ?? DEFAULT_WORKSPACE_ID;
+	const defaultProfiles = [
+		{ id: "profile-omp", name: "Oh My Pi", protocol: "omp" as const, config: {}, capabilityIds: [] },
+		{ id: "profile-codex", name: "Codex", protocol: "acp" as const, config: {}, capabilityIds: [] },
+		{ id: "profile-claude", name: "Claude Code", protocol: "terminal" as const, config: {}, capabilityIds: [] },
+	];
+
+	for (const profile of defaultProfiles) {
+		if (document.agentProfiles.some(item => item.id === profile.id)) continue;
+		document = await executeBootstrapCommand(client, {
+			version: 1,
+			commandId: `profile-bootstrap-${profile.id}`,
+			workspaceId,
+			expectedRevision: document.revision,
+			issuedAt: 1,
+			type: "profile.create",
+			payload: {
+				id: profile.id,
+				name: profile.name,
+				protocol: profile.protocol,
+				config: profile.config,
+				capabilityIds: profile.capabilityIds,
+			},
+		});
+	}
+}
+
+app.name = "Mars Kommander";
+app.setName("Mars Kommander");
+app.setAppUserModelId("labs.mars-kommander.desktop");
+app.commandLine.appendSwitch("remote-debugging-port", "9222");
 protocol.registerSchemesAsPrivileged([
 	{ scheme: "branchlight", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: false } },
 ]);
-
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
 	app.quit();
 } else {
 	app.on("second-instance", () => {
-		if (!mainWindow) return;
+		if (!mainWindow || mainWindow.isDestroyed()) return;
 		if (mainWindow.isMinimized()) mainWindow.restore();
 		mainWindow.focus();
 	});
-	void prepareBrowserControl()
-		.then(async cdpUrl => {
-			await app.whenReady();
-			app.setName("Branchlight");
-			app.setAppUserModelId("labs.branchlight.desktop");
+	void app
+		.whenReady()
+		.then(async () => {
+			if (process.platform === "darwin" && app.dock && typeof app.dock.setIcon === "function") {
+				const iconCandidates = [
+					path.join(__dirname, "..", "..", "resources", "icon.png"),
+					path.join(__dirname, "..", "..", "resources", "icon.icns"),
+				];
+				for (const cand of iconCandidates) {
+					if (existsSync(cand)) {
+						try {
+							app.dock.setIcon(cand);
+							break;
+						} catch {}
+					}
+				}
+			}
 			registerProtocol();
 			configureSecurity();
+			appSettingsStore = new AppSettingsStore(app.getPath("userData"), defaultWorkspacePath());
+			await appSettingsStore.load();
 			host = new DesktopHost(app.getPath("userData"));
 			await host.load();
+			const runtimeRoot = runtimeRootDir();
+			try {
+				runtimeDescriptor = await ensureWorkspaceRuntime({
+					runtimeDir: runtimeRoot,
+					executablePath: ompExecutablePath(),
+				});
+			} catch (error) {
+				logger.error("Branchlight runtime startup failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				app.quit();
+				return;
+			}
+			runtimeClient = runtimeDescriptor.client;
+
+			let doc: WorkspaceDocumentV1;
+			try {
+				const initialDocument = runtimeClient.document ?? (await runtimeClient.getDocument());
+				await ensureDefaultWorkspace(runtimeClient);
+				doc = runtimeClient.document ?? initialDocument;
+			} catch (error) {
+				logger.error("Could not initialize workspace authority", { error: String(error) });
+				app.quit();
+				return;
+			}
+
 			mainWindow = createWindow();
+			mainWindow.on("closed", () => {
+				host?.setWindow(undefined);
+				mainWindow = undefined;
+			});
 			host.setWindow(mainWindow);
-			workspace = new WorkspaceHost(mainWindow, cdpUrl);
-			registerIpc(host, workspace);
-			if (host.bootstrap().warning)
-				mainWindow.webContents.once("did-finish-load", () =>
-					mainWindow?.webContents.send("branchlight:event", {
-						sessionId: "",
-						type: "warning",
-						message: host?.bootstrap().warning,
-					}),
-				);
+			workspace = new WorkspaceHost(mainWindow, appSettingsStore);
+
+			let runtimeGeneration = 0;
+			let reconnecting = false;
+
+			async function reconnectRuntime(): Promise<void> {
+				if (reconnecting || quitting) return;
+				reconnecting = true;
+				if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+					mainWindow.webContents.send("branchlight:workspace", {
+						type: "connection-state",
+						state: "reconnecting",
+					});
+				}
+
+				let attempts = 0;
+				const maxAttempts = 10;
+				while (!quitting && attempts < maxAttempts) {
+					attempts++;
+					const delay = Math.min(500 * 1.5 ** (attempts - 1), 5000);
+					await new Promise(r => setTimeout(r, delay));
+					if (quitting) break;
+					try {
+						const nextDescriptor = await ensureWorkspaceRuntime({
+							runtimeDir: runtimeRoot,
+							executablePath: ompExecutablePath(),
+						});
+						const nextClient = nextDescriptor.client;
+						await nextClient.getDocument();
+						runtimeDescriptor = nextDescriptor;
+						runtimeClient = nextClient;
+						await bindRuntimeClient(nextClient);
+						if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+							mainWindow.webContents.send("branchlight:workspace", {
+								type: "connection-state",
+								state: "connected",
+							});
+						}
+						reconnecting = false;
+						return;
+					} catch (error) {
+						logger.warn("Runtime reconnect attempt failed", { attempt: attempts, error: String(error) });
+					}
+				}
+				reconnecting = false;
+			}
+
+			function bindRuntimeClient(client: WorkspaceClient): Promise<void> {
+				const generation = ++runtimeGeneration;
+				if (client.principal && client.document) {
+					host?.setWorkspaceAuthority(client.principal, client.document);
+				}
+				if (workspace) {
+					void workspace.replaceClient(client);
+				}
+
+				client.onDocument(d => {
+					if (generation !== runtimeGeneration) return;
+					if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+					if (client.principal) {
+						host?.setWorkspaceAuthority(client.principal, d);
+						workspace?.syncWithDocument(d);
+					}
+					mainWindow.webContents.send("branchlight:workspace-document", d);
+				});
+
+				client.onConnectionState(state => {
+					if (generation !== runtimeGeneration) return;
+					if (!state.connected && state.unexpected) {
+						void reconnectRuntime();
+					}
+				});
+
+				return Promise.resolve();
+			}
+
+			await bindRuntimeClient(runtimeClient);
+			registerIpc(host, workspace, appSettingsStore);
+			if (host.bootstrap().warning) {
+				mainWindow.webContents.once("did-finish-load", () => {
+					if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+						mainWindow.webContents.send("branchlight:event", {
+							sessionId: "",
+							type: "warning",
+							message: host?.bootstrap().warning,
+						});
+					}
+				});
+			}
 			await loadRenderer(mainWindow);
 		})
 		.catch(error => {
+			console.error("STARTUP ERROR:", error);
 			logger.error("Branchlight startup failed", { error: error instanceof Error ? error.message : String(error) });
 			app.quit();
 		});
@@ -60,33 +255,29 @@ if (!gotLock) {
 		if (quitting || (!host && !workspace)) return;
 		event.preventDefault();
 		quitting = true;
-		void Promise.all([host?.stopAll(), workspace?.stop()])
-			.then(() => host?.close())
-			.finally(() => app.quit());
+		void shutdownDesktopServices({
+			host,
+			workspace,
+			runtimeClient,
+			quit: () => app.quit(),
+		});
 	});
 	app.on("window-all-closed", () => {
-		if (process.platform !== "darwin") app.quit();
+		app.quit();
 	});
-}
-
-async function prepareBrowserControl(): Promise<string> {
-	const configured = Number.parseInt(process.env.BRANCHLIGHT_CDP_PORT ?? "", 10);
-	const port =
-		Number.isSafeInteger(configured) && configured > 0 && configured <= 65_535 ? configured : await findFreeTcpPort();
-	app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
-	app.commandLine.appendSwitch("remote-debugging-port", String(port));
-	return `http://127.0.0.1:${port}`;
 }
 
 function createWindow(): BrowserWindow {
+	const iconCandidate = path.join(__dirname, "..", "..", "resources", "icon.png");
 	const window = new BrowserWindow({
 		width: 1440,
 		height: 900,
 		minWidth: 960,
 		minHeight: 640,
-		title: "Branchlight",
+		title: "Mars Kommander",
 		frame: false,
 		backgroundColor: "#242321",
+		...(existsSync(iconCandidate) ? { icon: iconCandidate } : {}),
 		webPreferences: {
 			preload: path.join(__dirname, "preload.js"),
 			contextIsolation: true,
@@ -97,7 +288,11 @@ function createWindow(): BrowserWindow {
 		},
 	});
 	window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-	window.webContents.on("will-navigate", event => event.preventDefault());
+	window.webContents.on("will-navigate", (event, url) => {
+		if (DEV_SERVER && url.startsWith(DEV_SERVER.origin)) return;
+		if (url.startsWith("branchlight://")) return;
+		event.preventDefault();
+	});
 	window.webContents.on("will-attach-webview", event => event.preventDefault());
 	return window;
 }
@@ -137,11 +332,11 @@ function registerProtocol(): void {
 }
 
 async function loadRenderer(window: BrowserWindow): Promise<void> {
-	if (DEV_SERVER) await window.loadURL(`${DEV_SERVER}/src/renderer/index.html`);
+	if (DEV_SERVER) await window.loadURL(new URL("src/renderer/index.html", DEV_SERVER).toString());
 	else await window.loadURL("branchlight://app/index.html");
 }
 
-function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost): void {
+function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost, settingsStore?: AppSettingsStore): void {
 	ipcMain.handle("branchlight:bootstrap", event => {
 		assertTrustedSender(event);
 		return desktopHost.bootstrap();
@@ -149,6 +344,22 @@ function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost): vo
 	ipcMain.handle("branchlight:auth-status", event => {
 		assertTrustedSender(event);
 		return desktopHost.getAuthStatus();
+	});
+	ipcMain.handle("branchlight:oauth-accounts", event => {
+		assertTrustedSender(event);
+		return desktopHost.getOAuthAccounts();
+	});
+	ipcMain.handle("branchlight:set-oauth-account-lock", (event, providerId: unknown, credentialId: unknown) => {
+		assertTrustedSender(event);
+		return desktopHost.setOAuthAccountLock(providerId, credentialId);
+	});
+	ipcMain.handle("branchlight:set-oauth-account-failover", (event, enabled: unknown) => {
+		assertTrustedSender(event);
+		return desktopHost.setOAuthAccountFailover(enabled);
+	});
+	ipcMain.handle("branchlight:remove-oauth-account", (event, providerId: unknown, credentialId: unknown) => {
+		assertTrustedSender(event);
+		return desktopHost.removeOAuthAccount(providerId, credentialId);
 	});
 	ipcMain.handle("branchlight:auth-login", (event, provider: unknown) => {
 		assertTrustedSender(event);
@@ -161,6 +372,22 @@ function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost): vo
 	ipcMain.handle("branchlight:auth-prompt", (event, value: unknown) => {
 		assertTrustedSender(event);
 		return desktopHost.respondAuthPrompt(value);
+	});
+	ipcMain.handle("branchlight:settings-get", event => {
+		assertTrustedSender(event);
+		return settingsStore?.settings;
+	});
+	ipcMain.handle("branchlight:settings-update", async (event, updates: unknown) => {
+		assertTrustedSender(event);
+		const updated = await settingsStore?.update(typeof updates === "object" && updates !== null ? updates : {});
+		workspaceHost.updateTheme();
+		return updated;
+	});
+	ipcMain.handle("branchlight:settings-reset", async event => {
+		assertTrustedSender(event);
+		const reset = await settingsStore?.reset();
+		workspaceHost.updateTheme();
+		return reset;
 	});
 	ipcMain.handle("branchlight:agent-settings", (event, id: unknown) => {
 		assertTrustedSender(event);
@@ -281,13 +508,13 @@ function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost): vo
 		assertTrustedSender(event);
 		return desktopHost.openExternal(url);
 	});
-	ipcMain.handle("branchlight:browser-create", (event, id: unknown, url: unknown) => {
+	ipcMain.handle("branchlight:workspace-document-get", async event => {
 		assertTrustedSender(event);
-		return workspaceHost.createBrowser(id, url);
+		return runtimeClient?.document ?? (await runtimeClient?.getDocument()) ?? null;
 	});
-	ipcMain.handle("branchlight:browser-name", (event, id: unknown, name: unknown) => {
+	ipcMain.handle("branchlight:browser-create", (event, options: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.nameBrowser(id, name);
+		return workspaceHost.createBrowser(options as import("./workspace-host").CreateBrowserOptions);
 	});
 	ipcMain.handle("branchlight:browser-navigate", (event, id: unknown, url: unknown) => {
 		assertTrustedSender(event);
@@ -309,9 +536,9 @@ function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost): vo
 		assertTrustedSender(event);
 		return workspaceHost.closeBrowser(id);
 	});
-	ipcMain.handle("branchlight:terminal-create", (event, id: unknown, cols: unknown, rows: unknown) => {
+	ipcMain.handle("branchlight:terminal-create", (event, options: unknown) => {
 		assertTrustedSender(event);
-		return workspaceHost.createTerminal(id, cols, rows);
+		return workspaceHost.createTerminal(options as import("./workspace-host").CreateTerminalOptions);
 	});
 	ipcMain.handle("branchlight:terminal-write", (event, id: unknown, data: unknown) => {
 		assertTrustedSender(event);
@@ -324,6 +551,44 @@ function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost): vo
 	ipcMain.handle("branchlight:terminal-close", (event, id: unknown) => {
 		assertTrustedSender(event);
 		return workspaceHost.closeTerminal(id);
+	});
+	ipcMain.handle("branchlight:tab-update", (event, tabId: unknown, updates: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.updateTab(tabId, updates);
+	});
+	ipcMain.handle("branchlight:tab-close", (event, tabId: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.closeTab(tabId);
+	});
+	ipcMain.handle("branchlight:pane-close", (event, paneId: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.closePane(paneId);
+	});
+	ipcMain.on("branchlight:pane-context-menu", (event, id: unknown, canSplit: unknown) => {
+		assertTrustedSender(event);
+		workspaceHost.showPaneContextMenu(id, canSplit);
+	});
+	ipcMain.handle("branchlight:selection-start", (event, id: unknown, agentId: unknown, captureMode: unknown) => {
+		assertTrustedSender(event);
+		const pane = typeof id === "string" ? id.trim() : "";
+		const targetAgent = typeof agentId === "string" && agentId.trim().length > 0 ? agentId.trim() : undefined;
+		const mode = captureMode === "screenshot" ? "screenshot" : "dom";
+		const epoch = workspaceHost.getBrowserDocumentEpoch(pane);
+		const scope = desktopHost.resolveSelectionScope(pane, targetAgent, epoch);
+		return workspaceHost.startSelection(scope, { captureMode: mode });
+	});
+	ipcMain.handle("branchlight:selection-cancel", (event, id: unknown, reason: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.cancelSelection(id, reason);
+	});
+	ipcMain.handle("branchlight:selection-commit", (event, id: unknown, instruction: unknown) => {
+		assertTrustedSender(event);
+		const pane = typeof id === "string" ? id.trim() : "";
+		return workspaceHost.commitSelection(pane, typeof instruction === "string" ? instruction : undefined);
+	});
+	ipcMain.handle("branchlight:selection-state", (event, id: unknown) => {
+		assertTrustedSender(event);
+		return workspaceHost.getSelectionState(id);
 	});
 	ipcMain.handle("branchlight:window-minimize", event => {
 		assertTrustedSender(event);
@@ -351,7 +616,7 @@ function registerIpc(desktopHost: DesktopHost, workspaceHost: WorkspaceHost): vo
 	});
 }
 
-function assertTrustedSender(event: Electron.IpcMainInvokeEvent): void {
+function assertTrustedSender(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): void {
 	const senderUrl = event.senderFrame?.url;
 	if (!senderUrl) throw new Error("Untrusted IPC sender");
 	if (senderUrl.startsWith("branchlight://app/")) return;

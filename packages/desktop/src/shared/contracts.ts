@@ -56,6 +56,34 @@ export interface AgentSettingView {
 	apply: "immediate" | "next-session";
 }
 
+export interface BranchlightSettings {
+	theme: "dark" | "light" | "system";
+	confirmCloseTab: boolean;
+	terminal: {
+		shell: string;
+		fontSize: number;
+		fontFamily: string;
+		cursorBlink: boolean;
+		cursorStyle: "bar" | "block" | "underline";
+		scrollback: number;
+	};
+	browser: {
+		defaultUrl: string;
+		searchEngine: string;
+	};
+	workspace: {
+		defaultPath: string;
+	};
+}
+
+export type UpdateBranchlightSettingsInput = Partial<{
+	theme: "dark" | "light" | "system";
+	confirmCloseTab: boolean;
+	terminal: Partial<BranchlightSettings["terminal"]>;
+	browser: Partial<BranchlightSettings["browser"]>;
+	workspace: Partial<BranchlightSettings["workspace"]>;
+}>;
+
 export interface SessionRuntimeConfig {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
@@ -150,6 +178,20 @@ export interface SubagentView {
 		requests?: number;
 	};
 }
+export type RuntimePhase = "dormant" | "queued" | "starting" | "resident" | "stopping";
+
+export interface RuntimeReportView {
+	id: string;
+	phase: RuntimePhase;
+	processState: ProcessState;
+	healthy: boolean;
+	pid?: number;
+	residentMemoryBytes?: number;
+	lastUsedAt: number;
+	sampledAt?: number;
+	queuedAt?: number;
+	error?: string;
+}
 
 export interface SessionSnapshot extends SessionRuntimeConfig {
 	record: SessionRecordV1;
@@ -165,6 +207,7 @@ export interface SessionSnapshot extends SessionRuntimeConfig {
 	queuedMessageCount?: number;
 	todoPhases?: Array<{ title?: string; items: Array<{ text: string; completed: boolean }> }>;
 	warning?: string;
+	runtime?: RuntimeReportView;
 }
 
 export interface AuthAccountView {
@@ -177,6 +220,36 @@ export interface AuthAccountView {
 	orgName?: string;
 }
 
+export interface OAuthAccountSummaryView {
+	credentialId: number;
+	email?: string;
+	accountId?: string;
+	orgId?: string;
+	orgName?: string;
+	projectId?: string;
+	active: boolean;
+	locked: boolean;
+	lockable: boolean;
+}
+
+export interface OAuthProviderAccountsView {
+	id: string;
+	name: string;
+	available: boolean;
+	failover: boolean;
+	lockedCredentialId?: number;
+	accounts: OAuthAccountSummaryView[];
+}
+
+export interface OAuthAccountsView {
+	providers: OAuthProviderAccountsView[];
+}
+
+export interface SetOAuthAccountLockInput {
+	providerId: string;
+	credentialId?: number;
+}
+
 export type AuthEvent =
 	| { type: "progress"; provider: string; message: string }
 	| { type: "auth-url"; provider: string; message: string; url?: string }
@@ -184,8 +257,88 @@ export type AuthEvent =
 	| { type: "complete"; provider: string; message: string }
 	| { type: "error"; provider: string; message: string };
 
+import type { WorkspaceDocumentV1 } from "@oh-my-pi/pi-wire";
+
+export type { WorkspaceDocumentV1 };
+
+import type {
+	DeclarativePatchOperation,
+	DeclarativePatchOpType,
+	DeclarativePreviewPatch,
+	ElementBoundingBox,
+	ElementDomNode,
+	ElementDomSnapshot,
+	ElementEditPhase,
+	ElementEditResultV1,
+	ElementEditState,
+	ElementScreenshot,
+	ElementSelectionV1,
+	SelectionAuthScope,
+} from "@oh-my-pi/pi-workspace-runtime/selection";
+import { SELECTION_LIMITS } from "@oh-my-pi/pi-workspace-runtime/selection";
+
+export type {
+	DeclarativePatchOperation,
+	DeclarativePatchOpType,
+	DeclarativePreviewPatch,
+	ElementBoundingBox,
+	ElementDomNode,
+	ElementDomSnapshot,
+	ElementEditPhase,
+	ElementEditResultV1,
+	ElementEditState,
+	ElementScreenshot,
+	ElementSelectionV1,
+	SelectionAuthScope,
+};
+export { SELECTION_LIMITS };
+export type SelectionCaptureMode = "dom" | "screenshot";
+export interface CreateBrowserInput {
+	id: string;
+	url: string;
+	workspaceId: string;
+	tabId: string;
+	layout?: "columns" | "rows" | "grid";
+}
+
+export interface CreateTerminalInput {
+	id: string;
+	tabId: string;
+	workspaceId: string;
+	cols: number;
+	rows: number;
+	layout?: "columns" | "rows" | "grid";
+}
+
+export interface UpdateTabInput {
+	name?: string;
+	layout?: "columns" | "rows" | "grid";
+	ratio?: number;
+	activePaneId?: string;
+}
+
+export interface UpdateSelectionOptions {
+	selector?: string;
+	domSnapshot?: ElementDomSnapshot;
+	screenshot?: ElementScreenshot;
+	previewPatch?: DeclarativePreviewPatch;
+	url?: string;
+	captureMode?: SelectionCaptureMode;
+}
+
+export interface CommitSelectionPayload {
+	target?: string;
+	selector?: string;
+	instruction?: string;
+	agentId?: string;
+	domSnapshot?: ElementDomSnapshot;
+	screenshot?: ElementScreenshot;
+}
+
 export type WorkspacePaneKind = "browser" | "terminal";
 export type BrowserNavigationAction = "back" | "forward" | "reload" | "stop";
+export const MAX_WORKSPACE_PANES = 4;
+export type PaneContextMenuAction = "split-columns" | "split-rows" | "close";
 
 export interface BrowserBounds {
 	x: number;
@@ -215,8 +368,10 @@ export type WorkspaceEvent =
 	| { type: "browser-new-window"; paneId: string; url: string }
 	| { type: "terminal-data"; paneId: string; data: string }
 	| { type: "terminal-exit"; paneId: string; exitCode: number }
-	| { type: "terminal-error"; paneId: string; message: string };
-
+	| { type: "terminal-error"; paneId: string; message: string }
+	| { type: "pane-context-action"; paneId: string; action: PaneContextMenuAction }
+	| { type: "selection-state"; paneId: string; state: ElementEditState }
+	| { type: "connection-state"; state: "connected" | "reconnecting" | "disconnected" };
 export interface BootstrapSnapshot {
 	registry: SessionRegistryV1;
 	warning?: string;
@@ -232,6 +387,7 @@ export interface BranchlightEvent {
 	commands?: SlashCommand[];
 	config?: SessionRuntimeConfig;
 	extension?: ExtensionView;
+	runtime?: RuntimeReportView;
 	message?: string;
 }
 
@@ -269,6 +425,10 @@ export interface ExtensionView {
 
 export interface BranchlightApi {
 	getAuthStatus(): Promise<AuthAccountView[]>;
+	getOAuthAccounts(): Promise<OAuthAccountsView>;
+	setOAuthAccountLock(providerId: string, credentialId?: number): Promise<OAuthAccountsView>;
+	setOAuthAccountFailover(enabled: boolean): Promise<OAuthAccountsView>;
+	removeOAuthAccount(providerId: string, credentialId: number): Promise<OAuthAccountsView>;
 	loginProvider(provider: string): Promise<AuthAccountView[]>;
 	logoutProvider(provider: string): Promise<AuthAccountView[]>;
 	respondAuthPrompt(value: string): Promise<void>;
@@ -307,23 +467,36 @@ export interface BranchlightApi {
 	loadFileDiff(id: string, target: string): Promise<FileDiffView>;
 	openWorkspaceFile(id: string, target: string): Promise<void>;
 	openExternal(url: string): Promise<void>;
-	createBrowser(id: string, url: string): Promise<BrowserViewState>;
-	nameBrowser(id: string, name: string): Promise<void>;
+	getWorkspaceDocument(): Promise<WorkspaceDocumentV1 | null>;
+	createBrowser(options: CreateBrowserInput): Promise<BrowserViewState>;
 	navigateBrowser(id: string, url: string): Promise<BrowserViewState>;
 	controlBrowser(id: string, action: BrowserNavigationAction): Promise<void>;
 	setBrowserBounds(id: string, bounds: BrowserBounds): Promise<void>;
 	setVisibleBrowsers(ids: string[]): Promise<void>;
 	closeBrowser(id: string): Promise<void>;
-	createTerminal(id: string, cols: number, rows: number): Promise<TerminalViewState>;
+	showPaneContextMenu(id: string, canSplit: boolean): void;
+	createTerminal(options: CreateTerminalInput): Promise<TerminalViewState>;
 	writeTerminal(id: string, data: string): Promise<void>;
 	resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
 	closeTerminal(id: string): Promise<void>;
+	updateTab(tabId: string, updates: UpdateTabInput): Promise<void>;
+	closeTab(tabId: string): Promise<void>;
+	closePane(paneId: string): Promise<void>;
 	minimizeWindow(): Promise<void>;
 	toggleMaximizeWindow(): Promise<boolean>;
 	closeWindow(): Promise<void>;
 	onEvent(listener: (event: BranchlightEvent) => void): () => void;
 	onAuthEvent(listener: (event: AuthEvent) => void): () => void;
 	onWorkspaceEvent(listener: (event: WorkspaceEvent) => void): () => void;
+	onWorkspaceDocument(listener: (doc: WorkspaceDocumentV1) => void): () => void;
+	startSelection(paneId: string, agentId?: string, captureMode?: SelectionCaptureMode): Promise<ElementEditState>;
+	cancelSelection(paneId: string, reason?: string): Promise<ElementEditState>;
+	commitSelection(paneId: string, instruction?: string): Promise<ElementEditState>;
+	getSelectionState(paneId: string): Promise<ElementEditState>;
+	onSelectionStateChanged(listener: (state: ElementEditState) => void): () => void;
+	getAppSettings(): Promise<BranchlightSettings>;
+	updateAppSettings(updates: UpdateBranchlightSettingsInput): Promise<BranchlightSettings>;
+	resetAppSettings(): Promise<BranchlightSettings>;
 }
 
 declare global {
