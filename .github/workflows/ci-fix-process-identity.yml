@@ -73,7 +73,6 @@ jobs:
             packages/coding-agent/src/tools/computer/worker-entry.ts \
             packages/coding-agent/test/export-html-template.test.ts \
             packages/coding-agent/test/utils/changelog.test.ts \
-            packages/coding-agent/src/export/html/tool-views.generated.js \
             .github/workflows/ci-fix-process-identity.yml \
             .github/scripts/apply-ci-fixes.py \
             .github/scripts/apply-changelog-ci-fix.py
