@@ -22,10 +22,13 @@ jobs:
         shell: bash
         run: |
           python3 .github/scripts/apply-ci-round2.py
+          python3 .github/scripts/apply-ci-runtime-entry-fix.py
 
           bun install --frozen-lockfile
           bunx biome format --write \
             packages/coding-agent/src/modes/rpc/rpc-client.ts \
+            packages/coding-agent/src/desktop-terminal/runtime-server-entry.ts \
+            packages/workspace-runtime/src/bootstrap.ts \
             scripts/ci-release-publish.ts \
             packages/browser-runtime/tsconfig.publish.json \
             packages/workspace-runtime/tsconfig.publish.json
@@ -39,20 +42,23 @@ jobs:
 
           bun run ci:check:full
           (cd packages/coding-agent && bun test test/rpc-client.restart.test.ts --parallel=1 --timeout=30000)
-          bun scripts/ci-release-publish.ts --dry-run
           OMP_INSTALL_TEST_SKIP_NATIVE_BUILD=1 bun run ci:test:install-methods
 
           rm .github/workflows/ci-fix-round2.yml
           rm .github/scripts/apply-ci-round2.py
+          rm .github/scripts/apply-ci-runtime-entry-fix.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
             packages/coding-agent/src/modes/rpc/rpc-client.ts \
+            packages/coding-agent/src/desktop-terminal/runtime-server-entry.ts \
+            packages/workspace-runtime/src/bootstrap.ts \
             scripts/install-tests/run-ci.sh \
             scripts/ci-release-publish.ts \
             packages/browser-runtime/tsconfig.publish.json \
             packages/workspace-runtime/tsconfig.publish.json \
             .github/workflows/ci-fix-round2.yml \
-            .github/scripts/apply-ci-round2.py
-          git commit -m "fix: publish workspace runtimes and preserve RPC exit diagnostics"
+            .github/scripts/apply-ci-round2.py \
+            .github/scripts/apply-ci-runtime-entry-fix.py
+          git commit -m "fix: publish workspace runtimes and resolve packaged server entry"
           git push origin HEAD:feat/omp-chat-workspace
