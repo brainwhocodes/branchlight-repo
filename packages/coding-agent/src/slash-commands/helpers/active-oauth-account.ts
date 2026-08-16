@@ -1,23 +1,38 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import { replaceTabs } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 
 function normalizeIdentityValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
 }
 
+/** Convert persisted account metadata into safe, single-line display text. */
+export function sanitizeOAuthAccountLabel(value: string): string {
+	return replaceTabs(sanitizeText(value))
+		.replace(/[\r\n]+/g, " ")
+		.trim();
+}
+
 /**
  * Session marker label for an active OAuth identity: the base identifier
- * (email → accountId → projectId) suffixed with the organization when present
- * and distinct. Same-email Anthropic multi-org accounts share the base, so the
- * org suffix is the only field that tells the session's quota pool apart —
- * mirrors the account-list rows (`formatUsageReportAccount`) and login success.
- * Returns `undefined` when no identifier is recoverable.
+ * (email → accountId → projectId, falling back to organization identity)
+ * suffixed with the organization when present and distinct. Same-email
+ * Anthropic multi-org accounts share the base, so the org suffix is the only
+ * field that tells the session's quota pool apart — mirrors the account-list
+ * rows (`formatUsageReportAccount`) and login success. Returns `undefined`
+ * when no identifier is recoverable.
  */
 export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefined): string | undefined {
 	if (!identity) return undefined;
-	const base = identity.email || identity.accountId || identity.projectId;
-	if (!base) return undefined;
-	const org = identity.orgName || identity.orgId;
+	const base =
+		(identity.email ? sanitizeOAuthAccountLabel(identity.email) : undefined) ||
+		(identity.accountId ? sanitizeOAuthAccountLabel(identity.accountId) : undefined) ||
+		(identity.projectId ? sanitizeOAuthAccountLabel(identity.projectId) : undefined);
+	const org =
+		(identity.orgName ? sanitizeOAuthAccountLabel(identity.orgName) : undefined) ||
+		(identity.orgId ? sanitizeOAuthAccountLabel(identity.orgId) : undefined);
+	if (!base) return org;
 	return org && org !== base ? `${base} (${org})` : base;
 }
 

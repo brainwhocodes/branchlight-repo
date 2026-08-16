@@ -1,9 +1,13 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatDuration, renderAsciiBar } from "./format";
+import {
+	buildOAuthAccountRoutingDisplay,
+	formatOAuthAccountSelectionLine,
+	type OAuthAccountRoutingDisplayResolver,
+} from "./oauth-account-routing-display";
 
 function formatProviderName(provider: string): string {
 	return provider
@@ -62,7 +66,7 @@ function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, index:
 function renderUsageReports(
 	reports: UsageReport[],
 	nowMs: number,
-	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
+	resolveOAuthAccountRoutingDisplay?: OAuthAccountRoutingDisplayResolver,
 	usageModelSelectors: readonly string[] = [],
 ): string {
 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
@@ -78,12 +82,15 @@ function renderUsageReports(
 		left.localeCompare(right),
 	)) {
 		lines.push("", formatProviderName(provider));
+		const routingDisplay = resolveOAuthAccountRoutingDisplay?.(provider);
+		const selectionLine = routingDisplay ? formatOAuthAccountSelectionLine(routingDisplay) : undefined;
+		if (selectionLine) lines.push(`  ${selectionLine}`);
 		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
 		if (reportingModels.length > 0) {
 			lines.push("  Models with usage data");
 			for (const selector of reportingModels) lines.push(`    ${sanitizeText(selector)}`);
 		}
-		const activeAccount = resolveActiveAccount?.(provider);
+		const activeAccount = routingDisplay?.actualAccount;
 		// Provider-wide disclaimers render once per provider, not per limit.
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		for (const note of providerNotes)
@@ -134,7 +141,11 @@ function renderUsageReports(
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
 				lines.push(
-					`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
+					`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}${
+						inUse
+							? `  ← in use by this session${routingDisplay?.actualAccountIsFailover ? " (failover)" : ""}`
+							: ""
+					}`,
 				);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
@@ -162,21 +173,16 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 		fetchUsageReports?: () => Promise<UsageReport[] | null>;
 		getUsageReportingModelSelectors?: (reports: readonly UsageReport[]) => string[];
 	};
+	const sessionId = runtime.session.sessionId;
 	if (provider.fetchUsageReports) {
 		const reports = await provider.fetchUsageReports();
 		if (reports && reports.length > 0) {
-			const currentProvider = runtime.session.model?.provider;
-			const activeAccount = currentProvider
-				? runtime.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-						currentProvider,
-						runtime.session.sessionId,
-					)
-				: undefined;
+			const authStorage = runtime.session.modelRegistry.authStorage;
 			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
 			return renderUsageReports(
 				reports,
 				Date.now(),
-				providerId => (providerId === currentProvider ? activeAccount : undefined),
+				providerId => buildOAuthAccountRoutingDisplay(authStorage, providerId, sessionId),
 				usageModelSelectors,
 			);
 		}

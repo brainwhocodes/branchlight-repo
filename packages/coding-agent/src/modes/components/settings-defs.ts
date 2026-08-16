@@ -30,7 +30,7 @@ import {
 // UI Definition Types
 // ═══════════════════════════════════════════════════════════════════════════
 
-export type SettingValue = boolean | string;
+export type SettingValue = boolean | string | Readonly<Record<string, string>>;
 
 interface BaseSettingDef {
 	path: SettingPath;
@@ -74,6 +74,10 @@ export interface ProviderLimitsSettingDef extends BaseSettingDef {
 	type: "providerLimits";
 }
 
+export interface OAuthAccountsSettingDef extends BaseSettingDef {
+	type: "oauthAccounts";
+}
+
 /** Array-of-enum setting edited as a toggle list; `ordered` lists render positions and support reordering. */
 export interface MultiSelectSettingDef extends BaseSettingDef {
 	type: "multiselect";
@@ -87,6 +91,7 @@ export type SettingDef =
 	| SubmenuSettingDef
 	| TextInputSettingDef
 	| ProviderLimitsSettingDef
+	| OAuthAccountsSettingDef
 	| MultiSelectSettingDef;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -163,6 +168,10 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 	const schemaType = getType(path);
 	const condition = ui.condition ? CONDITIONS[ui.condition] : undefined;
 	const base = { path, label: ui.label, description: ui.description, tab: ui.tab, group: ui.group, condition };
+
+	if (path === "providers.oauthAccountLocks") {
+		return { ...base, type: "oauthAccounts" };
+	}
 
 	if (schemaType === "boolean") {
 		return { ...base, type: "boolean" };

@@ -66,20 +66,60 @@ describe("renderUsageReports multi-account column alignment (#6067)", () => {
 		// Account A: weekly exhausted, 5h free. Account B: weekly light, 5h exhausted.
 		// A naive per-window sort by used fraction swaps the columns between rows.
 		const reports: UsageReport[] = [acct("alice@example.test", 1.0, 0.0), acct("bob@example.test", 0.2, 1.0)];
-		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 160));
+		const text = stripVTControlCharacters(
+			renderUsageReports(reports, theme, Date.now(), 160, () => ({
+				automaticRouting: true,
+				selectionUnavailable: false,
+				allowSiblingFailover: false,
+				actualAccount: { email: "bob@example.test" },
+				actualAccountIsFailover: false,
+			})),
+		);
 		const lines = text.split("\n");
 
-		const columnOrder = (sectionLabel: string): string[] => {
+		const accountLabelRow = (sectionLabel: string): string => {
 			const headerIdx = lines.findIndex(l => l.includes(sectionLabel));
 			expect(headerIdx).toBeGreaterThanOrEqual(0);
-			// The account-label row is the line right after the section header.
-			const labelRow = lines[headerIdx + 1];
+			return lines[headerIdx + 1]!;
+		};
+		const columnOrder = (sectionLabel: string): string[] => {
+			const labelRow = accountLabelRow(sectionLabel);
 			return ["alice@example.test", "bob@example.test"].sort((a, b) => labelRow.indexOf(a) - labelRow.indexOf(b));
 		};
 
 		const totalOrder = columnOrder("Total quota");
 		const fiveHOrder = columnOrder("5h limit");
 		expect(fiveHOrder).toEqual(totalOrder);
+		expect(accountLabelRow("Total quota")).toContain("● bob@example.test");
+		expect(accountLabelRow("5h limit")).toContain("● bob@example.test");
+		expect(accountLabelRow("Total quota")).not.toContain("● alice@example.test");
+		expect(accountLabelRow("5h limit")).not.toContain("● alice@example.test");
+	});
+
+	it("aligns locked-account percentages beneath narrow account columns", () => {
+		const width = 40;
+		const reports: UsageReport[] = [acct("a@test", 0.8, 0.8), acct("b@test", 0.2, 0.2)];
+		const text = stripVTControlCharacters(
+			renderUsageReports(reports, theme, Date.now(), width, () => ({
+				automaticRouting: false,
+				selectedAccountLabel: "a@test",
+				selectionUnavailable: false,
+				allowSiblingFailover: false,
+				actualAccount: { email: "a@test" },
+				actualAccountIsFailover: false,
+			})),
+		);
+		const lines = text.split("\n");
+		const headerIdx = lines.findIndex(line => line.includes("Total quota"));
+		expect(headerIdx).toBeGreaterThanOrEqual(0);
+		const labelRow = lines[headerIdx + 1]!;
+		const barRow = lines[headerIdx + 2]!;
+		const valueRow = lines[headerIdx + 3]!;
+
+		expect(valueRow.indexOf("20% free")).toBe(labelRow.search(/\S/));
+		expect(valueRow.indexOf("80% free")).toBe(labelRow.indexOf("b@test"));
+		expect(lines.indexOf(valueRow)).toBe(lines.indexOf(barRow) + 1);
+		expect(Bun.stringWidth(valueRow)).toBeLessThanOrEqual(width);
 	});
 
 	it("keeps all-used-only amount cells within four-column narrow widths", () => {

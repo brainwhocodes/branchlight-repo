@@ -183,7 +183,15 @@ describe("renderUsageReports session marker (#5691 org-qualified identity)", () 
 		];
 		const text = stripVTControlCharacters(
 			renderUsageReports(reports, theme, Date.now(), 120, provider =>
-				provider === "anthropic" ? { email, orgId: "uuid-A", orgName: "Team Org" } : undefined,
+				provider === "anthropic"
+					? {
+							automaticRouting: true,
+							selectionUnavailable: false,
+							allowSiblingFailover: false,
+							actualAccount: { email, orgId: "uuid-A", orgName: "Team Org" },
+							actualAccountIsFailover: false,
+						}
+					: undefined,
 			),
 		);
 		const marker = text.split("\n").find(line => line.includes("in use by this session"));
@@ -197,11 +205,37 @@ describe("renderUsageReports session marker (#5691 org-qualified identity)", () 
 		];
 		const text = stripVTControlCharacters(
 			renderUsageReports(reports, theme, Date.now(), 120, provider =>
-				provider === "anthropic" ? { email } : undefined,
+				provider === "anthropic"
+					? {
+							automaticRouting: true,
+							selectionUnavailable: false,
+							allowSiblingFailover: false,
+							actualAccount: { email },
+							actualAccountIsFailover: false,
+						}
+					: undefined,
 			),
 		);
 		const marker = text.split("\n").find(line => line.includes("in use by this session"));
 		expect(marker).toContain(email);
 		expect(marker).not.toContain("(");
+	});
+
+	it("constrains the configured-account line to the available width", () => {
+		const reports: UsageReport[] = [
+			report("anthropic", "active@example.test", [limit("Claude 7 Day", "weekly", 7 * 24 * HOUR, 0.4)]),
+		];
+		const text = stripVTControlCharacters(
+			renderUsageReports(reports, theme, Date.now(), 40, () => ({
+				automaticRouting: false,
+				selectedAccountLabel: `locked-${"account".repeat(20)}@example.test`,
+				selectionUnavailable: false,
+				allowSiblingFailover: false,
+				actualAccountIsFailover: false,
+			})),
+		);
+		const lockLine = text.split("\n").find(line => line.includes("Locked account:"));
+		expect(lockLine).toBeDefined();
+		expect(Bun.stringWidth(lockLine ?? "")).toBeLessThanOrEqual(40);
 	});
 });

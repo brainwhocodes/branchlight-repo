@@ -97,6 +97,31 @@ describe("settings layout", () => {
 		}
 	});
 
+	it("puts OAuth account routing first in the provider Accounts group", () => {
+		expect(TAB_GROUPS.providers[0]).toBe("Accounts");
+
+		const [locks, failover] = getSettingsForTab("providers");
+		expect([locks?.path, failover?.path]).toEqual(["providers.oauthAccountLocks", "providers.oauthAccountFailover"]);
+		expect(locks).toMatchObject({
+			path: "providers.oauthAccountLocks",
+			label: "OAuth Accounts",
+			description: "Add, remove, and choose the stored OAuth account used by each provider.",
+			type: "oauthAccounts",
+			tab: "providers",
+			group: "Accounts",
+		});
+		expect(locks?.type).not.toBe("text");
+		expect(failover).toMatchObject({
+			path: "providers.oauthAccountFailover",
+			label: "Account Failover",
+			description:
+				"Allow a locked OAuth account to use another stored account when it is unavailable or rate-limited.",
+			type: "boolean",
+			tab: "providers",
+			group: "Accounts",
+		});
+	});
+
 	it("shows provider request limits as a providers services submenu setting", () => {
 		const [def] = getSettingsForTab("providers").filter(item => item.path === "providers.maxInFlightRequests");
 

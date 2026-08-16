@@ -44,6 +44,7 @@ import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
+import { OAuthAccountManagerComponent, type OAuthAccountManagerOptions } from "./oauth-account-manager";
 import { bottomBorder, divider, row, topBorder } from "./overlay-box";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
@@ -505,6 +506,8 @@ export interface SettingsRuntimeContext {
 	imageBudget?: ImageBudget;
 	/** Schedules a re-render after async preview work completes. */
 	requestRender?: () => void;
+	/** OAuth account inventory and mutation host supplied by the interactive controller. */
+	oauthAccounts?: OAuthAccountManagerOptions;
 }
 
 /** Status line settings subset for preview */
@@ -542,6 +545,7 @@ export class SettingsSelectorComponent implements Component {
 	#currentList: SettingsList | null = null;
 	#searchList: SettingsList | null = null;
 	#pluginComponent: PluginSettingsComponent | null = null;
+	#oauthAccountManager: OAuthAccountManagerComponent | null = null;
 	#currentTabId: SettingTab | "plugins" = "appearance";
 	#preSearchTabId: SettingTab | "plugins" = "appearance";
 	#searchQuery = "";
@@ -587,6 +591,7 @@ export class SettingsSelectorComponent implements Component {
 		this.#currentList?.invalidate();
 		this.#searchList?.invalidate();
 		this.#pluginComponent?.invalidate();
+		this.#oauthAccountManager?.invalidate();
 	}
 
 	/** Swap the active content (per-tab list, search list, or plugins). */
@@ -594,6 +599,7 @@ export class SettingsSelectorComponent implements Component {
 		this.#currentList = null;
 		this.#searchList = null;
 		this.#pluginComponent = null;
+		this.#oauthAccountManager = null;
 		build();
 	}
 
@@ -989,6 +995,16 @@ export class SettingsSelectorComponent implements Component {
 					submenu: (_cv, done) => this.#createMultiSelect(def, done),
 					changed,
 				};
+
+			case "oauthAccounts":
+				return {
+					id: def.path,
+					label: def.label,
+					description: def.description,
+					currentValue: this.#formatOAuthAccountsValue(currentValue),
+					submenu: (_cv, done) => this.#createOAuthAccounts(done),
+					changed,
+				};
 		}
 	}
 
@@ -1006,6 +1022,18 @@ export class SettingsSelectorComponent implements Component {
 				currentValue.length !== defaultValue.length ||
 				currentValue.some((entry, index) => entry !== defaultValue[index])
 			);
+		}
+		if (def.type === "oauthAccounts") {
+			const current =
+				currentValue !== null && typeof currentValue === "object" && !Array.isArray(currentValue)
+					? (currentValue as Record<string, unknown>)
+					: {};
+			const defaults =
+				defaultValue !== null && typeof defaultValue === "object" && !Array.isArray(defaultValue)
+					? (defaultValue as Record<string, unknown>)
+					: {};
+			const keys = Object.keys(current);
+			return keys.length !== Object.keys(defaults).length || keys.some(key => current[key] !== defaults[key]);
 		}
 		return !Object.is(currentValue, defaultValue);
 	}
@@ -1159,6 +1187,29 @@ export class SettingsSelectorComponent implements Component {
 			() => done(),
 			this.context.requestRender,
 		);
+	}
+
+	#createOAuthAccounts(done: (value?: string) => void): OAuthAccountManagerComponent {
+		const options = this.context.oauthAccounts;
+		if (!options) {
+			throw new Error("OAuth account manager dependencies are unavailable");
+		}
+		let manager: OAuthAccountManagerComponent;
+		manager = new OAuthAccountManagerComponent(options, {
+			onChange: locks => this.callbacks.onChange("providers.oauthAccountLocks", locks),
+			onClose: () => {
+				if (this.#oauthAccountManager === manager) this.#oauthAccountManager = null;
+				done(this.#formatOAuthAccountsValue(settings.get("providers.oauthAccountLocks")));
+			},
+		});
+		this.#oauthAccountManager = manager;
+		return manager;
+	}
+
+	#formatOAuthAccountsValue(value: unknown): string {
+		if (value === null || typeof value !== "object" || Array.isArray(value)) return "Automatic";
+		const count = Object.values(value as Record<string, unknown>).filter(entry => typeof entry === "string").length;
+		return count === 0 ? "Automatic" : `${count} locked`;
 	}
 
 	#formatProviderLimitsValue(value: unknown): string {
@@ -1410,6 +1461,11 @@ export class SettingsSelectorComponent implements Component {
 		} else if (this.#pluginComponent) {
 			this.#pluginComponent.handleInput(data);
 		}
+	}
+
+	/** Forward enhanced paste transports into a nested OAuth login dialog. */
+	pasteText(text: string): void {
+		this.#oauthAccountManager?.pasteText(text);
 	}
 
 	#handleSearchModeInput(data: string, list: SettingsList): void {
