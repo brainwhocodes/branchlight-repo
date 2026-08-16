@@ -1,18 +1,22 @@
 from __future__ import annotations
 
-import base64
-import binascii
+import asyncio
 import json
 import os
 import queue
+import secrets
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Generic, Mapping, Sequence, TypeVar, cast
 
+import grpc
+
+from . import omp_rpc_pb2, omp_rpc_pb2_grpc
 from .host_tools import HostTool, HostToolContext
 from .host_uris import HostUri, HostUriContext, normalize_read_result
 from .protocol import (
@@ -116,104 +120,15 @@ THistoryItem = TypeVar("THistoryItem")
 _ASYNC_COMMANDS = frozenset({"prompt", "abort_and_prompt"})
 _DEFAULT_ERROR_HISTORY_LIMIT = 128
 _TODO_STATUS_VALUES = frozenset({"pending", "in_progress", "completed", "abandoned"})
-_MAX_RPC_FRAME_BYTES = 1024 * 1024
-_MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024
-_RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024
-_RPC_MESSAGES_PAGE_BUSY_ERROR = "Cannot page messages while the session is changing"
-_RPC_MESSAGES_PAGE_STALE_ERROR = "RPC message cursor is stale"
-_RPC_MESSAGES_PAGE_FALLBACK_CODES = frozenset({"session_busy", "stale_cursor"})
+_OMP_GRPC_PROTOCOL_VERSION = 1
+_OMP_GRPC_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+_OMP_GRPC_HOST = "127.0.0.1"
+_GRPC_CHANNEL_OPTIONS = (
+    ("grpc.max_send_message_length", _OMP_GRPC_MAX_MESSAGE_BYTES),
+    ("grpc.max_receive_message_length", _OMP_GRPC_MAX_MESSAGE_BYTES),
+)
 
 
-@dataclass(slots=True)
-class _PendingRpcChunks:
-    chunk_id: str
-    count: int
-    byte_length: int
-    next_index: int = 0
-    chunks: list[bytes] = field(default_factory=list)
-    received_bytes: int = 0
-
-
-class _RpcFrameDecoder:
-    def __init__(self) -> None:
-        self._pending: _PendingRpcChunks | None = None
-
-    def push(self, value: object) -> JsonObject | None:
-        if not isinstance(value, dict) or value.get("type") != "rpc_chunk":
-            if self._pending is not None:
-                raise RpcError("RPC chunk sequence was interrupted")
-            if not isinstance(value, dict):
-                raise RpcError("RPC frame must be a JSON object")
-            return cast(JsonObject, value)
-
-        chunk_id = value.get("chunkId")
-        index = value.get("index")
-        count = value.get("count")
-        byte_length = value.get("byteLength")
-        data = value.get("data")
-        max_chunk_count = (
-            _MAX_RPC_REASSEMBLED_BYTES + _RPC_CHUNK_PAYLOAD_BYTES - 1
-        ) // _RPC_CHUNK_PAYLOAD_BYTES
-        if (
-            not isinstance(chunk_id, str)
-            or not chunk_id
-            or len(chunk_id) > 128
-            or not isinstance(index, int)
-            or isinstance(index, bool)
-            or not isinstance(count, int)
-            or isinstance(count, bool)
-            or not isinstance(byte_length, int)
-            or isinstance(byte_length, bool)
-            or index < 0
-            or count < 2
-            or count > max_chunk_count
-            or index >= count
-            or byte_length < _MAX_RPC_FRAME_BYTES
-            or byte_length > _MAX_RPC_REASSEMBLED_BYTES
-            or not isinstance(data, str)
-            or not data
-        ):
-            raise RpcError("Invalid RPC chunk metadata")
-        try:
-            chunk = base64.b64decode(data, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise RpcError("Invalid RPC chunk data") from exc
-        if base64.b64encode(chunk).decode("ascii") != data:
-            raise RpcError("Invalid RPC chunk data")
-        if len(chunk) > _RPC_CHUNK_PAYLOAD_BYTES:
-            raise RpcError("RPC chunk payload exceeds the transport limit")
-
-        if self._pending is None:
-            if index != 0:
-                raise RpcError("RPC chunk sequence must start at index 0")
-            self._pending = _PendingRpcChunks(chunk_id, count, byte_length)
-        pending = self._pending
-        if (
-            pending.chunk_id != chunk_id
-            or pending.count != count
-            or pending.byte_length != byte_length
-            or pending.next_index != index
-        ):
-            raise RpcError("RPC chunk sequence mismatch")
-        pending.chunks.append(chunk)
-        pending.received_bytes += len(chunk)
-        pending.next_index += 1
-        if pending.received_bytes > pending.byte_length:
-            raise RpcError("RPC chunk sequence exceeds its declared length")
-        if pending.next_index < pending.count:
-            return None
-        if pending.received_bytes != pending.byte_length:
-            raise RpcError("RPC chunk sequence length mismatch")
-
-        self._pending = None
-        try:
-            decoded = b"".join(pending.chunks).decode("utf-8")
-            frame = json.loads(decoded)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RpcError("Failed to decode reassembled RPC frame") from exc
-        if not isinstance(frame, dict):
-            raise RpcError("RPC frame must be a JSON object")
-        return cast(JsonObject, frame)
 
 
 def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
@@ -240,8 +155,7 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
     grandchildren: they reparent to the container init and keep running
     untracked — how a runaway test ballooned to tens of GB of RAM. Signal the
     whole group, escalating SIGTERM -> SIGKILL, so descendants die with the
-    task even when the leader has already exited on its own (the graceful
-    stdin-close path).
+    task even when the leader has already exited after the gRPC stream closes.
 
     `pgid` is captured at spawn; `os.killpg` is POSIX-only, so without it
     (Windows) we fall back to terminating the leader process alone.
@@ -330,9 +244,9 @@ class RpcCommandError(RpcError):
 
 
 class RpcProtocolError(RpcError):
-    """Raised or reported when the transport receives an unmatched RPC error response."""
+    """Raised or reported for an uncorrelated or inconsistent RPC response."""
 
-    def __init__(self, payload: JsonObject):
+    def __init__(self, payload: JsonObject, *, message: str | None = None):
         self.payload = dict(payload)
         command = payload.get("command")
         request_id = payload.get("id")
@@ -341,13 +255,14 @@ class RpcProtocolError(RpcError):
         self.request_id = str(request_id) if isinstance(request_id, str) else None
         self.remote_error = str(error) if isinstance(error, str) else None
 
-        fragments = ["Received unmatched RPC error response"]
-        if self.command:
-            fragments.append(f"for {self.command}")
-        if self.request_id:
-            fragments.append(f"(id={self.request_id})")
-        if self.remote_error:
-            fragments.append(f": {self.remote_error}")
+        fragments = [message or "Received unmatched RPC error response"]
+        if message is None:
+            if self.command:
+                fragments.append(f"for {self.command}")
+            if self.request_id:
+                fragments.append(f"(id={self.request_id})")
+            if self.remote_error:
+                fragments.append(f": {self.remote_error}")
         super().__init__(" ".join(fragments))
 
 
@@ -502,7 +417,14 @@ class RpcClient:
 
         self._process: subprocess.Popen[str] | None = None
         self._pgid: int | None = None
-        self._stdout_thread: threading.Thread | None = None
+        self._grpc_thread: threading.Thread | None = None
+        self._grpc_loop: asyncio.AbstractEventLoop | None = None
+        self._grpc_call: grpc.aio.StreamStreamCall[
+            omp_rpc_pb2.ClientFrame, omp_rpc_pb2.ServerFrame
+        ] | None = None
+        self._grpc_channel: grpc.aio.Channel | None = None
+        self._bootstrap: JsonObject | None = None
+        self._bootstrap_tempdir: tempfile.TemporaryDirectory[str] | None = None
         self._stderr_thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._write_lock = threading.Lock()
@@ -526,9 +448,6 @@ class RpcClient:
         self._stopping = False
         self._ready_received = False
         self._ready_event: ReadyEvent | None = None
-        self._protocol_version = 1
-        self._protocol_v2_enabled = False
-        self._frame_decoder = _RpcFrameDecoder()
         self._protocol_errors = _BoundedHistory[RpcProtocolError](
             _DEFAULT_ERROR_HISTORY_LIMIT
         )
@@ -581,9 +500,6 @@ class RpcClient:
         self._closed_error = None
         self._ready_received = False
         self._ready_event = None
-        self._protocol_version = 1
-        self._protocol_v2_enabled = False
-        self._frame_decoder = _RpcFrameDecoder()
         self._events.clear()
         self._async_errors.clear()
         self._scheduled_agent_runs = 0
@@ -592,76 +508,74 @@ class RpcClient:
         self._ui_requests = queue.Queue()
         with self._state_lock:
             self._stderr_chunks.clear()
-        with self._state_lock:
             self._protocol_errors.clear()
             self._listener_errors.clear()
 
-        process = subprocess.Popen(
-            list(self._build_command()),
-            cwd=str(self._cwd) if self._cwd is not None else None,
-            env={**os.environ, **self._env},
-            user=self._user,
-            group=self._group,
-            extra_groups=self._extra_groups,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            start_new_session=True,
-        )
+        self._bootstrap_tempdir = tempfile.TemporaryDirectory(prefix="omp-grpc-")
+        bootstrap_path = Path(self._bootstrap_tempdir.name) / "bootstrap.json"
+        token = secrets.token_urlsafe(32)
+        grpc_env = {
+            "OMP_GRPC_HOST": _OMP_GRPC_HOST,
+            "OMP_GRPC_PORT": "0",
+            "OMP_GRPC_TOKEN": token,
+            "OMP_GRPC_READY_FILE": str(bootstrap_path),
+        }
+        try:
+            process = subprocess.Popen(
+                list(self._build_command()),
+                cwd=str(self._cwd) if self._cwd is not None else None,
+                env={**os.environ, **self._env, **grpc_env},
+                user=self._user,
+                group=self._group,
+                extra_groups=self._extra_groups,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                start_new_session=True,
+            )
+        except BaseException:
+            self._bootstrap_tempdir.cleanup()
+            self._bootstrap_tempdir = None
+            raise
         self._process = process
         self._pgid = _process_group_id(process)
-
-        self._stdout_thread = threading.Thread(
-            target=self._read_stdout_loop, name="omp-rpc-stdout", daemon=True
-        )
         self._stderr_thread = threading.Thread(
             target=self._read_stderr_loop, name="omp-rpc-stderr", daemon=True
         )
-        self._stdout_thread.start()
         self._stderr_thread.start()
 
-        if not self._ready.wait(self._startup_timeout):
-            stderr = self.stderr
-            self.stop()
-            raise RpcTimeoutError(
-                f"Timed out waiting for RPC ready signal. Stderr: {stderr}"
+        deadline = time.monotonic() + self._startup_timeout
+        try:
+            self._bootstrap = self._wait_for_bootstrap(
+                bootstrap_path, token, process, deadline
             )
-
-        if not self._ready_received:
-            error = self._closed_error
-            stderr = self.stderr
-            self.stop()
-            if isinstance(error, RpcError):
-                raise error
-            if error is not None:
-                raise RpcProcessExitError(
-                    f"RPC process stopped before ready: {error}. Stderr: {stderr}"
-                ) from error
-            raise RpcTimeoutError(
-                f"Timed out waiting for RPC ready signal. Stderr: {stderr}"
+            self._grpc_thread = threading.Thread(
+                target=self._run_grpc_loop, name="omp-rpc-grpc", daemon=True
             )
-
-        ready_event = self._ready_event
-        if (
-            ready_event is not None
-            and ready_event.supported_protocol_versions is not None
-            and 2 in ready_event.supported_protocol_versions
-            and ready_event.max_frame_bytes == _MAX_RPC_FRAME_BYTES
-            and ready_event.max_reassembled_frame_bytes == _MAX_RPC_REASSEMBLED_BYTES
-        ):
-            try:
-                self._protocol_v2_enabled = True
-                negotiation = self._request("negotiate_protocol", protocolVersion=2)
-                if negotiation.get("protocolVersion") != 2:
-                    raise RpcError("RPC protocol v2 negotiation failed")
-                self._protocol_version = 2
-            except BaseException:
-                self.stop()
-                raise
+            self._grpc_thread.start()
+            remaining = max(0.0, deadline - time.monotonic())
+            if not self._ready.wait(remaining):
+                raise RpcTimeoutError(
+                    f"Timed out waiting for gRPC ready frame. Stderr: {self.stderr}"
+                )
+            if not self._ready_received:
+                error = self._closed_error
+                if isinstance(error, RpcError):
+                    raise error
+                if error is not None:
+                    raise RpcProcessExitError(
+                        f"RPC process stopped before ready: {error}. Stderr: {self.stderr}"
+                    ) from error
+                raise RpcTimeoutError(
+                    f"Timed out waiting for gRPC ready frame. Stderr: {self.stderr}"
+                )
+        except BaseException:
+            self.stop()
+            raise
 
         if self._custom_tools:
             self.set_custom_tools(self._custom_tools)
@@ -680,45 +594,41 @@ class RpcClient:
         for pending_uri in self._pending_host_uri_requests.values():
             pending_uri.cancel_event.set()
 
-        try:
-            if process.stdin is not None:
-                try:
-                    process.stdin.close()
-                except OSError:
-                    pass
+        loop = self._grpc_loop
+        if loop is not None and loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._close_grpc(), loop)
+                future.result(timeout=2.0)
+            except Exception:
+                pass
+        if self._grpc_thread is not None:
+            self._grpc_thread.join(timeout=2.0)
 
+        try:
             _terminate_process_group(process, self._pgid)
         finally:
-            if process.stdout is not None:
-                try:
-                    process.stdout.close()
-                except OSError:
-                    pass
             if process.stderr is not None:
                 try:
                     process.stderr.close()
                 except OSError:
                     pass
-            # Mark the client closed so any thread blocked in
-            # `_wait_for_agent_end` raises `RpcProcessExitError` instead of
-            # waiting for its request timeout. The stdout reader loop would
-            # normally do this when it observes the closed pipe, but it
-            # guards on `if not self._stopping:` — which is True by the time
-            # we get here — and so skips it. Calling `_mark_closed` directly
-            # closes the gap. It is idempotent: a second call (e.g. from the
-            # reader's exception path) returns early.
             self._mark_closed(RpcProcessExitError("RPC process stopped"))
             self._pending_host_tool_calls.clear()
             self._host_tool_dispatch_names.clear()
             self._pending_host_uri_requests.clear()
             self._process = None
             self._pgid = None
-            if self._stdout_thread is not None:
-                self._stdout_thread.join(timeout=1.0)
             if self._stderr_thread is not None:
                 self._stderr_thread.join(timeout=1.0)
-            self._stdout_thread = None
+            self._grpc_thread = None
+            self._grpc_loop = None
+            self._grpc_call = None
+            self._grpc_channel = None
+            self._bootstrap = None
             self._stderr_thread = None
+            if self._bootstrap_tempdir is not None:
+                self._bootstrap_tempdir.cleanup()
+                self._bootstrap_tempdir = None
 
     def on_event(self, listener: AgentEventListener) -> Callable[[], None]:
         self._event_listeners.append(listener)
@@ -1020,44 +930,6 @@ class RpcClient:
         return self.set_todos(())
 
     def get_messages(self) -> tuple[AgentMessage, ...]:
-        if self._protocol_version == 2:
-            try:
-                messages: list[AgentMessage] = []
-                seen_cursors: set[str] = set()
-                total_messages: int | None = None
-                cursor: str | None = None
-                while True:
-                    page = self.get_messages_page(cursor=cursor, limit=256)
-                    if (
-                        total_messages is not None
-                        and page.total_messages != total_messages
-                    ):
-                        raise RpcError(
-                            "RPC message pagination returned an inconsistent total"
-                        )
-                    total_messages = page.total_messages
-                    messages.extend(page.messages)
-                    cursor = page.next_cursor
-                    if cursor is None:
-                        break
-                    if cursor in seen_cursors:
-                        raise RpcError("RPC message pagination repeated a cursor")
-                    seen_cursors.add(cursor)
-                if len(messages) != total_messages:
-                    raise RpcError(
-                        "RPC message pagination ended before the advertised total"
-                    )
-                return tuple(messages)
-            except RpcCommandError as error:
-                if error.command != "get_messages_page" or not (
-                    error.code in _RPC_MESSAGES_PAGE_FALLBACK_CODES
-                    or error.error
-                    in (
-                        _RPC_MESSAGES_PAGE_BUSY_ERROR,
-                        _RPC_MESSAGES_PAGE_STALE_ERROR,
-                    )
-                ):
-                    raise
         payload = self._request("get_messages")
         return parse_agent_messages(cast(JsonValue | None, payload.get("messages")))
 
@@ -1371,7 +1243,7 @@ class RpcClient:
                 self._event_condition.wait(remaining)
 
     def _request(self, command_type: str, **payload: JsonValue) -> JsonObject:
-        process = self._require_process()
+        self._require_process()
         request_id = self._next_request_id()
         envelope: JsonObject = {"id": request_id, "type": command_type}
         for key, value in payload.items():
@@ -1385,7 +1257,7 @@ class RpcClient:
             )
 
         try:
-            self._write_json(process, envelope)
+            self._send_grpc_frame(envelope)
         except BaseException:
             with self._state_lock:
                 self._pending.pop(request_id, None)
@@ -1417,8 +1289,8 @@ class RpcClient:
         return _clone_json_object(data)
 
     def _send_notification(self, payload: JsonObject) -> None:
-        process = self._require_process()
-        self._write_json(process, payload)
+        self._require_process()
+        self._send_grpc_frame(payload)
 
     def _normalize_host_tool_result(self, result: object) -> JsonObject:
         if isinstance(result, str):
@@ -1462,10 +1334,6 @@ class RpcClient:
             or not isinstance(tool_call_id, str)
         ):
             return
-        # Remember the dispatch so tool_execution_* events for this call id can
-        # be renamed from the transport tool to the host tool that ran; see
-        # _normalize_host_tool_event.
-        self._host_tool_dispatch_names[tool_call_id] = tool_name
         if not isinstance(raw_arguments, Mapping):
             self._send_notification(
                 {
@@ -1511,6 +1379,9 @@ class RpcClient:
                 }
             )
             return
+        # Remember only accepted dispatches. Rejected calls never produce a
+        # host execution whose transport events should be renamed.
+        self._host_tool_dispatch_names[tool_call_id] = tool_name
 
         pending_call = _PendingHostToolCall(cancel_event=threading.Event())
         self._pending_host_tool_calls[request_id] = pending_call
@@ -1837,169 +1708,301 @@ class RpcClient:
             raise RpcError("RPC client is not started")
         return self._process
 
-    def _write_json(self, process: subprocess.Popen[str], payload: JsonObject) -> None:
-        if process.stdin is None:
-            raise RpcProcessExitError("RPC process stdin is unavailable")
-        with self._write_lock:
-            try:
-                process.stdin.write(json.dumps(payload))
-                process.stdin.write("\n")
-                process.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
+    def _wait_for_bootstrap(
+        self,
+        path: Path,
+        token: str,
+        process: subprocess.Popen[str],
+        deadline: float,
+    ) -> JsonObject:
+        while True:
+            exit_code = process.poll()
+            if exit_code is not None:
                 raise RpcProcessExitError(
-                    f"Failed to write RPC command: {exc}"
-                ) from exc
+                    f"RPC process exited with code {exit_code} before publishing its gRPC endpoint. "
+                    f"Stderr: {self.stderr}"
+                )
+            try:
+                raw_bootstrap = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                if time.monotonic() >= deadline:
+                    raise RpcTimeoutError(
+                        f"Timed out waiting for gRPC bootstrap file. Stderr: {self.stderr}"
+                    )
+                time.sleep(0.01)
+                continue
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RpcError(f"Failed to read gRPC bootstrap file: {exc}") from exc
 
-    def _read_stdout_loop(self) -> None:
-        process = self._process
-        if process is None or process.stdout is None:
-            return
+            if not isinstance(raw_bootstrap, dict):
+                raise RpcError("gRPC bootstrap file must contain a JSON object")
+            bootstrap = cast(JsonObject, raw_bootstrap)
+            if bootstrap.get("protocol") != "grpc":
+                raise RpcError("gRPC bootstrap has an unsupported protocol")
+            if bootstrap.get("protocolVersion") != _OMP_GRPC_PROTOCOL_VERSION:
+                raise RpcError("gRPC bootstrap has an unsupported protocol version")
+            if bootstrap.get("host") != _OMP_GRPC_HOST:
+                raise RpcError("gRPC bootstrap must advertise the loopback host")
+            port = bootstrap.get("port")
+            if (
+                not isinstance(port, int)
+                or isinstance(port, bool)
+                or port < 1
+                or port > 65535
+            ):
+                raise RpcError("gRPC bootstrap has an invalid port")
+            if bootstrap.get("token") != token:
+                raise RpcError("gRPC bootstrap token does not match the spawned process")
+            if bootstrap.get("maxMessageBytes") != _OMP_GRPC_MAX_MESSAGE_BYTES:
+                raise RpcError("gRPC bootstrap has an unsupported message size limit")
+            return bootstrap
 
-        line_number = 0
+    def _run_grpc_loop(self) -> None:
         try:
-            for line in process.stdout:
-                line_number += 1
-                stripped = line.strip()
-                if not stripped:
-                    continue
-
-                try:
-                    raw_payload = json.loads(stripped)
-                except json.JSONDecodeError as exc:
-                    snippet = stripped
-                    if len(snippet) > 240:
-                        snippet = f"{snippet[:237]}..."
-                    raise RpcError(
-                        f"Failed to decode RPC output on line {line_number}: {exc}. Frame: {snippet!r}"
-                    ) from exc
-                if (
-                    isinstance(raw_payload, dict)
-                    and raw_payload.get("type") == "rpc_chunk"
-                    and not self._protocol_v2_enabled
-                ):
-                    raise RpcError("RPC chunk received before protocol negotiation")
-                payload = self._frame_decoder.push(raw_payload)
-                if payload is None:
-                    continue
-                if payload.get("type") == "response":
-                    self._handle_response(payload)
-                    continue
-                if payload.get("type") == "host_tool_call":
-                    self._handle_host_tool_call(payload)
-                    continue
-                if payload.get("type") == "host_tool_cancel":
-                    self._handle_host_tool_cancel(payload)
-                    continue
-                if payload.get("type") == "host_uri_request":
-                    self._handle_host_uri_request(payload)
-                    continue
-                if payload.get("type") == "host_uri_cancel":
-                    self._handle_host_uri_cancel(payload)
-                    continue
-
-                payload_type = payload.get("type")
-                if payload_type in ("tool_execution_update", "tool_execution_end"):
-                    self._normalize_host_tool_event(payload)
-                try:
-                    notification = parse_notification(payload)
-                except (TypeError, ValueError) as exc:
-                    # Protocol drift must not terminate the reader. This also
-                    # demotes parser defects to UnknownNotification; consumers
-                    # that need visibility should register an unknown listener.
-                    notification = UnknownNotification(
-                        _clone_json_object(payload), parse_error=str(exc)
-                    )
-                    if (
-                        payload_type == "agent_end"
-                        and payload.get("isTerminal") is not False
-                    ):
-                        self._append_async_error(
-                            RpcError(f"Failed to parse terminal agent_end: {exc}")
-                        )
-                        self._mark_agent_run_completed()
-                self._dispatch_listeners(
-                    "notification",
-                    notification.type,
-                    self._notification_listeners,
-                    notification,
-                )
-
-                if isinstance(notification, ReadyEvent):
-                    self._ready_event = notification
-                    self._ready_received = True
-                    self._ready.set()
-                    self._dispatch_listeners(
-                        "ready",
-                        notification.type,
-                        self._ready_listeners,
-                        notification,
-                    )
-                    continue
-
-                if isinstance(notification, ExtensionUiRequest):
-                    self._ui_requests.put(notification)
-                    self._dispatch_listeners(
-                        "ui_request",
-                        notification.type,
-                        self._ui_request_listeners,
-                        notification,
-                    )
-                    continue
-
-                if isinstance(notification, ExtensionError):
-                    self._dispatch_listeners(
-                        "extension_error",
-                        notification.type,
-                        self._extension_error_listeners,
-                        notification,
-                    )
-                    continue
-
-                if isinstance(notification, UnknownNotification):
-                    self._dispatch_listeners(
-                        "unknown_notification",
-                        notification.type,
-                        self._unknown_notification_listeners,
-                        notification,
-                    )
-                    continue
-
-                event = cast(RpcAgentEvent, notification)
-                self._append_event(payload)
-                if (
-                    isinstance(event, AgentEndEvent)
-                    and event.is_terminal is not False
-                ):
-                    self._mark_agent_run_completed()
-                self._dispatch_listeners(
-                    "event", event.type, self._event_listeners, event
-                )
-                self._dispatch_listeners(
-                    "typed_event",
-                    event.type,
-                    self._typed_event_listeners.get(event.type, []),
-                    event,
-                )
-        except Exception as exc:
-            self._mark_closed(exc)
-        else:
+            asyncio.run(self._grpc_main())
+        except BaseException as exc:
             if not self._stopping:
-                exit_code = process.poll()
-                if exit_code is None:
-                    try:
-                        exit_code = process.wait(timeout=1.0)
-                    except subprocess.TimeoutExpired:
-                        self._mark_closed(
-                            RpcProcessExitError(
-                                "RPC process stdout closed before the process exited"
-                            )
-                        )
-                        return
+                self._mark_closed(RpcProcessExitError(f"gRPC stream failed: {exc}"))
+
+    async def _grpc_main(self) -> None:
+        bootstrap = self._bootstrap
+        if bootstrap is None:
+            raise RpcError("gRPC bootstrap is unavailable")
+        host = cast(str, bootstrap["host"])
+        port = cast(int, bootstrap["port"])
+        token = cast(str, bootstrap["token"])
+        self._grpc_loop = asyncio.get_running_loop()
+        channel = grpc.aio.insecure_channel(
+            f"{host}:{port}", options=_GRPC_CHANNEL_OPTIONS
+        )
+        self._grpc_channel = channel
+        try:
+            await channel.channel_ready()
+            stub = omp_rpc_pb2_grpc.AgentServiceStub(channel)
+            call = stub.Connect(
+                metadata=(("authorization", f"Bearer {token}"),),
+                wait_for_ready=True,
+            )
+            self._grpc_call = call
+            received_ready = False
+            async for frame in call:
+                frame_kind = frame.WhichOneof("frame")
+                if not received_ready:
+                    if frame_kind != "ready":
+                        raise RpcError("First gRPC server frame must be ready")
+                    await asyncio.to_thread(self._handle_ready_frame, frame.ready)
+                    received_ready = True
+                    continue
+                if frame_kind == "ready":
+                    raise RpcError("gRPC server sent more than one ready frame")
+                await asyncio.to_thread(self._handle_server_frame, frame)
+            if not self._stopping:
                 self._mark_closed(
                     RpcProcessExitError(
-                        f"RPC process exited with code {exit_code}. Stderr: {self.stderr}"
+                        f"gRPC stream closed before the client stopped. Stderr: {self.stderr}"
                     )
                 )
+        finally:
+            await channel.close()
+
+    async def _close_grpc(self) -> None:
+        call = self._grpc_call
+        if call is not None:
+            try:
+                await call.done_writing()
+            except (grpc.RpcError, asyncio.InvalidStateError):
+                pass
+            call.cancel()
+        channel = self._grpc_channel
+        if channel is not None:
+            await channel.close()
+
+    def _send_grpc_frame(self, payload: JsonObject) -> None:
+        loop = self._grpc_loop
+        call = self._grpc_call
+        if loop is None or call is None or not loop.is_running():
+            raise RpcProcessExitError("gRPC stream is unavailable")
+        frame_type = payload.get("type")
+        if not isinstance(frame_type, str):
+            raise RpcError("RPC frame type must be a string")
+        body = {key: value for key, value in payload.items() if key not in ("id", "type")}
+        payload_json = json.dumps(
+            body, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        if len(payload_json) > _OMP_GRPC_MAX_MESSAGE_BYTES:
+            raise RpcError("RPC payload exceeds the gRPC message size limit")
+
+        request_id = payload.get("id")
+        with self._state_lock:
+            is_command = (
+                isinstance(request_id, str)
+                and request_id in self._pending
+                and self._pending[request_id].command == frame_type
+            )
+        if is_command:
+            frame = omp_rpc_pb2.ClientFrame(
+                command=omp_rpc_pb2.Command(
+                    id=request_id,
+                    name=frame_type,
+                    payload_json=payload_json,
+                    has_id=True,
+                )
+            )
+        else:
+            push_body = dict(body)
+            if request_id is not None:
+                push_body["id"] = request_id
+            frame = omp_rpc_pb2.ClientFrame(
+                push=omp_rpc_pb2.Push(
+                    type=frame_type,
+                    payload_json=json.dumps(
+                        push_body, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8"),
+                )
+            )
+        if frame.ByteSize() > _OMP_GRPC_MAX_MESSAGE_BYTES:
+            raise RpcError("RPC frame exceeds the gRPC message size limit")
+        with self._write_lock:
+            future = asyncio.run_coroutine_threadsafe(call.write(frame), loop)
+            try:
+                future.result(timeout=self._request_timeout)
+            except TimeoutError as exc:
+                raise RpcTimeoutError("Timed out writing to the gRPC stream") from exc
+            except grpc.RpcError as exc:
+                raise RpcProcessExitError(
+                    f"Failed to write to the gRPC stream: {exc}"
+                ) from exc
+
+    def _handle_ready_frame(self, ready: omp_rpc_pb2.Ready) -> None:
+        if ready.protocol_version != _OMP_GRPC_PROTOCOL_VERSION:
+            raise RpcError("gRPC server uses an unsupported protocol version")
+        if ready.max_message_bytes != _OMP_GRPC_MAX_MESSAGE_BYTES:
+            raise RpcError("gRPC server uses an unsupported message size limit")
+        event = ReadyEvent(
+            protocol_version=ready.protocol_version,
+            max_message_bytes=ready.max_message_bytes,
+        )
+        self._ready_event = event
+        self._ready_received = True
+        self._ready.set()
+        self._dispatch_listeners(
+            "ready", event.type, self._ready_listeners, event
+        )
+
+    def _handle_server_frame(self, frame: omp_rpc_pb2.ServerFrame) -> None:
+        frame_kind = frame.WhichOneof("frame")
+        if frame_kind == "response":
+            response = frame.response
+            payload: JsonObject = {
+                "type": "response",
+                "command": response.command,
+                "success": response.success,
+            }
+            if response.has_id:
+                payload["id"] = response.id
+            if response.has_data:
+                payload["data"] = self._decode_json(response.data_json, "response data")
+            if response.has_error:
+                payload["error"] = response.error
+            if response.has_code:
+                payload["code"] = response.code
+            self._handle_response(payload)
+            return
+        if frame_kind == "push":
+            body = self._decode_json_object(frame.push.payload_json, "push payload")
+            self._handle_push_payload({**body, "type": frame.push.type})
+            return
+        raise RpcError("gRPC server sent an empty frame")
+
+    @staticmethod
+    def _decode_json(data: bytes, field: str) -> JsonValue:
+        try:
+            return cast(JsonValue, json.loads(data.decode("utf-8")))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RpcError(f"Failed to decode gRPC {field}: {exc}") from exc
+
+    @classmethod
+    def _decode_json_object(cls, data: bytes, field: str) -> JsonObject:
+        value = cls._decode_json(data, field)
+        if not isinstance(value, dict):
+            raise RpcError(f"gRPC {field} must be a JSON object")
+        return cast(JsonObject, value)
+
+    def _handle_push_payload(self, payload: JsonObject) -> None:
+        if payload.get("type") == "host_tool_call":
+            self._handle_host_tool_call(payload)
+            return
+        if payload.get("type") == "host_tool_cancel":
+            self._handle_host_tool_cancel(payload)
+            return
+        if payload.get("type") == "host_uri_request":
+            self._handle_host_uri_request(payload)
+            return
+        if payload.get("type") == "host_uri_cancel":
+            self._handle_host_uri_cancel(payload)
+            return
+
+        payload_type = payload.get("type")
+        if payload_type in ("tool_execution_update", "tool_execution_end"):
+            self._normalize_host_tool_event(payload)
+        try:
+            notification = parse_notification(payload)
+        except (TypeError, ValueError) as exc:
+            notification = UnknownNotification(
+                _clone_json_object(payload), parse_error=str(exc)
+            )
+            if (
+                payload_type == "agent_end"
+                and payload.get("isTerminal") is not False
+            ):
+                self._append_async_error(
+                    RpcError(f"Failed to parse terminal agent_end: {exc}")
+                )
+                self._mark_agent_run_completed()
+        self._dispatch_listeners(
+            "notification",
+            notification.type,
+            self._notification_listeners,
+            notification,
+        )
+
+        if isinstance(notification, ExtensionUiRequest):
+            self._ui_requests.put(notification)
+            self._dispatch_listeners(
+                "ui_request",
+                notification.type,
+                self._ui_request_listeners,
+                notification,
+            )
+            return
+        if isinstance(notification, ExtensionError):
+            self._dispatch_listeners(
+                "extension_error",
+                notification.type,
+                self._extension_error_listeners,
+                notification,
+            )
+            return
+        if isinstance(notification, UnknownNotification):
+            self._dispatch_listeners(
+                "unknown_notification",
+                notification.type,
+                self._unknown_notification_listeners,
+                notification,
+            )
+            return
+
+        event = cast(RpcAgentEvent, notification)
+        self._append_event(payload)
+        if isinstance(event, AgentEndEvent) and event.is_terminal is not False:
+            self._mark_agent_run_completed()
+        self._dispatch_listeners("event", event.type, self._event_listeners, event)
+        self._dispatch_listeners(
+            "typed_event",
+            event.type,
+            self._typed_event_listeners.get(event.type, []),
+            event,
+        )
 
     def _read_stderr_loop(self) -> None:
         process = self._process
@@ -2035,7 +2038,20 @@ class RpcClient:
             with self._state_lock:
                 pending = self._pending.pop(request_id, None)
             if pending is not None:
-                pending.response_queue.put(payload)
+                actual_command = payload.get("command")
+                if actual_command == pending.command:
+                    pending.response_queue.put(payload)
+                    return
+                mismatch = RpcProtocolError(
+                    payload,
+                    message=(
+                        f"RPC response command mismatch for id {request_id}: "
+                        f"expected {pending.command!r}, received {actual_command!r}"
+                    ),
+                )
+                self._append_protocol_error(mismatch)
+                pending.response_queue.put(mismatch)
+                self._dispatch_protocol_error(mismatch)
                 return
 
         if self._deliver_correlated_error_response(payload):
@@ -2101,12 +2117,18 @@ class RpcClient:
             self._async_errors.append(error)
             self._event_condition.notify_all()
 
-    def _record_protocol_error(self, error: RpcProtocolError) -> None:
+    def _append_protocol_error(self, error: RpcProtocolError) -> None:
         with self._state_lock:
             self._protocol_errors.append(error)
+
+    def _dispatch_protocol_error(self, error: RpcProtocolError) -> None:
         self._dispatch_listeners(
             "protocol_error", error.command, self._protocol_error_listeners, error
         )
+
+    def _record_protocol_error(self, error: RpcProtocolError) -> None:
+        self._append_protocol_error(error)
+        self._dispatch_protocol_error(error)
 
     def _record_listener_error(self, event: ListenerErrorEvent) -> None:
         with self._state_lock:

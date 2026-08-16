@@ -5,12 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "omp-rpc"
 version = "0.1.0"
-description = "Typed Python client for the omp coding-agent RPC protocol"
+description = "Typed Python client for the omp coding-agent gRPC protocol"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "OpenAI Codex" }]
-keywords = ["omp", "rpc", "agent", "coding-agent", "jsonl", "stdio"]
+keywords = ["omp", "rpc", "grpc", "agent", "coding-agent", "http2"]
+dependencies = [
+    "grpcio>=1.83.0,<2",
+    "protobuf>=7.35.1,<8",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -27,6 +31,12 @@ Homepage = "https://omp.sh/"
 Repository = "https://github.com/can1357/oh-my-pi"
 Documentation = "https://github.com/can1357/oh-my-pi/blob/main/docs/rpc.md"
 
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools>=1.83.0,<2",
+    "pytest>=8.0",
+]
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 
@@ -34,4 +44,4 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-omp_rpc = ["py.typed"]
+omp_rpc = ["py.typed", "omp_rpc.proto"]

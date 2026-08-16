@@ -1,0 +1,9 @@
+syntax = "proto3";
+package omp.rpc.v1;
+service AgentService { rpc Connect(stream ClientFrame) returns (stream ServerFrame); }
+message Command { string id = 1; string name = 2; bytes payload_json = 3; bool has_id = 4; }
+message Push { string type = 1; bytes payload_json = 2; }
+message ClientFrame { oneof frame { Command command = 1; Push push = 2; } }
+message Ready { uint32 protocol_version = 1; uint64 max_message_bytes = 2; }
+message Response { string id = 1; bool has_id = 2; string command = 3; bool success = 4; bytes data_json = 5; bool has_data = 6; string error = 7; string code = 8; bool has_error = 9; bool has_code = 10; }
+message ServerFrame { oneof frame { Ready ready = 1; Response response = 2; Push push = 3; } }

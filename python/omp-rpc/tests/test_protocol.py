@@ -50,7 +50,7 @@ class ProtocolParsingTests(unittest.TestCase):
                 "steeringMode": "one-at-a-time",
                 "followUpMode": "all",
                 "interruptMode": "immediate",
-                "sessionFile": "/tmp/test.jsonl",
+                "sessionFile": "/tmp/test.session",
                 "sessionId": "session-123",
                 "sessionName": "Scratchpad",
                 "fastModeEnabled": False,
@@ -86,6 +86,14 @@ class ProtocolParsingTests(unittest.TestCase):
                     "contextWindow": 200000,
                     "percent": 6.1725,
                 },
+                "runtime": {
+                    "pid": 1234,
+                    "uptimeMs": 5678.5,
+                    "residentMemoryBytes": 1000000,
+                    "heapUsedBytes": 400000,
+                    "heapTotalBytes": 600000,
+                    "externalMemoryBytes": 10000,
+                },
             }
         )
 
@@ -101,6 +109,13 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(state.context_usage.tokens, 12345)
         self.assertEqual(state.context_usage.context_window, 200000)
         self.assertEqual(state.context_usage.percent, 6.1725)
+        assert state.runtime is not None
+        self.assertEqual(state.runtime.pid, 1234)
+        self.assertEqual(state.runtime.uptime_ms, 5678.5)
+        self.assertEqual(state.runtime.resident_memory_bytes, 1000000)
+        self.assertEqual(state.runtime.heap_used_bytes, 400000)
+        self.assertEqual(state.runtime.heap_total_bytes, 600000)
+        self.assertEqual(state.runtime.external_memory_bytes, 10000)
         assert state.model is not None and state.model.thinking is not None
         self.assertEqual(
             state.model.thinking.efforts, ("minimal", "low", "medium", "high")

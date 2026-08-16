@@ -14,7 +14,8 @@ class _Sentinel(Exception):
 def _start_and_capture(**kwargs):
     client = RpcClient(**kwargs)
     with patch(
-        "omp_rpc.client.subprocess.Popen", side_effect=_Sentinel("aborted")
+        "omp_rpc.client.subprocess.Popen",
+        side_effect=_Sentinel("aborted"),
     ) as mock_popen:
         with pytest.raises(_Sentinel):
             client.start()
@@ -43,5 +44,13 @@ def test_user_and_group_kwargs_threaded():
 
 def test_extra_groups_none_distinct_from_empty():
     call = _start_and_capture(executable="omp", extra_groups=[])
-    # [] means an empty supplementary group list and differs from None.
     assert call.kwargs["extra_groups"] == []
+
+
+def test_start_injects_grpc_bootstrap_environment():
+    call = _start_and_capture(executable="omp")
+    environment = call.kwargs["env"]
+    assert environment["OMP_GRPC_HOST"] == "127.0.0.1"
+    assert environment["OMP_GRPC_PORT"] == "0"
+    assert environment["OMP_GRPC_TOKEN"]
+    assert environment["OMP_GRPC_READY_FILE"].endswith("bootstrap.json")

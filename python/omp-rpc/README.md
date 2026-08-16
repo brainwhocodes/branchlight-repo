@@ -1,19 +1,91 @@
 # omp-rpc
 
-Typed Python bindings for the `omp --mode rpc` protocol used by the coding agent.
+Typed Python bindings for `omp --mode rpc` using the authenticated loopback h2c
+gRPC transport.
 
-This package wraps the newline-delimited JSON RPC transport exposed by the CLI and
-provides:
+This package provides a synchronous `RpcClient` API backed internally by
+`grpc.aio` and the canonical `omp.rpc.v1.AgentService/Connect` bidirectional
+stream. It includes:
 
 - typed command methods for the stable RPC surface
 - typed startup options for common `omp --mode rpc` flags such as thinking level,
-  tool selection, prompt appends, provider session IDs, and headless session toggles
+  tool selection, prompt appends, provider session IDs, and headless session
+  toggles
 - typed protocol models for state, bash results, compaction, and session stats
-- automatic protocol v2 negotiation, lossless chunk reassembly, and stable message pagination
-- a process-backed client that manages request correlation over stdio
+- automatic bootstrap from the gRPC ready file and bearer-token metadata
+- a process-backed client that manages request correlation over the gRPC stream
 - typed per-event listeners plus a typed catch-all notification hook
-- helpers for collecting prompt runs and handling extension UI requests in manual or headless mode
-- typed host-tool helpers so Python RPC owners can expose custom tools with JSON Schema metadata
+- helpers for collecting prompt runs and handling extension UI requests in manual
+  or headless mode
+- typed host-tool helpers so Python RPC owners can expose custom tools with JSON
+  Schema metadata
+
+## Transport
+
+RPC mode is served as cleartext HTTP/2 on `127.0.0.1`. The canonical service is
+`omp.rpc.v1.AgentService.Connect`; the canonical path is
+`/omp.rpc.v1.AgentService/Connect`. Clients may send `application/grpc` or
+`application/grpc+proto` content types, with an optional `;...` parameter when
+emitted by gRPC libraries. Non-gRPC content types are rejected. Server responses
+emit `application/grpc+proto`.
+
+The generated Python protobuf modules are:
+
+- `omp_rpc/omp_rpc_pb2.py`
+- `omp_rpc/omp_rpc_pb2_grpc.py`
+
+To regenerate the stubs, install the dev-only `grpcio-tools` extra and run:
+
+```bash
+python -m grpc_tools.protoc -I src --python_out=src --grpc_python_out=src src/omp_rpc/omp_rpc.proto
+```
+
+The stream carries protobuf frames. Protobuf fields carry framing metadata such
+as ids, frame kinds, command names, and push types. `payload_json` contains only
+the dynamic body: command frames reconstruct `{id,type:name,...payload}`, push
+frames reconstruct `{type,...payload}`, and clients correlate responses by `id`
+rather than by arrival order. The gRPC layer supplies message
+boundaries and flow control. The maximum serialized protobuf message size is 64
+MiB (`67108864`) in either direction.
+
+## Bootstrap and Authentication
+
+`RpcClient` starts `omp --mode rpc` by default, supplies bootstrap environment,
+waits for ready JSON, then opens an authenticated gRPC stream.
+
+Bootstrap variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `OMP_GRPC_HOST` | Loopback host to bind and advertise; Python clients set it to `127.0.0.1`. |
+| `OMP_GRPC_PORT` | TCP port for the h2c listener; `0` lets the OS choose a free port. |
+| `OMP_GRPC_TOKEN` | Bearer token required by the `Connect` call. |
+| `OMP_GRPC_READY_FILE` | Path where the agent writes ready JSON after the listener is listening and before it accepts streams. |
+
+Ready JSON schema:
+
+```json
+{
+  "protocol": "grpc",
+  "protocolVersion": 1,
+  "host": "127.0.0.1",
+  "port": 51234,
+  "token": "opaque bearer token",
+  "maxMessageBytes": 67108864
+}
+```
+
+The agent writes this file atomically with mode `0600` inside the client's
+private temporary directory.
+
+
+Each `Connect` stream includes bearer authorization metadata:
+
+```text
+authorization: Bearer <token from ready JSON>
+```
+
+The token is process-local bootstrap material. Do not persist or log it.
 
 ## Basic Usage
 
@@ -28,7 +100,7 @@ with RpcClient(provider="anthropic", model="claude-sonnet-4-5") as client:
     print(turn.require_assistant_text())
 ```
 
-The wrapper also exposes the common RPC startup flags directly, so scripts do not
+The wrapper also exposes common RPC startup flags directly, so scripts do not
 need to build `extra_args` by hand:
 
 ```python
@@ -46,8 +118,8 @@ with RpcClient(
     print(client.get_state().thinking_level)
 ```
 
-For orchestration hosts, the wrapper also exposes typed event hooks and a simple
-way to seed todos before the first prompt:
+For orchestration hosts, the wrapper exposes typed event hooks and a simple way
+to seed todos before the first prompt:
 
 ```python
 from omp_rpc import MessageUpdateEvent, RpcClient
@@ -99,11 +171,38 @@ with RpcClient(
     print(client.get_state().session_id)
 ```
 
+## Lifecycle and Cleanup
+
+A `RpcClient` context manager owns the child process it starts, the private
+ready-file temporary directory, the bearer token, and the active gRPC stream.
+Entering the context waits until the ready JSON is written and the authenticated
+`Connect` stream is open. Exiting closes the stream and channel, reaps the owned
+process, fails pending waiters with transport errors if needed, and removes the
+ready file and temporary directory.
+
+Long-lived hosts can bound retained event history:
+
+```python
+from omp_rpc import RpcClient
+
+with RpcClient(max_event_history=20_000) as client:
+    ...
+```
+
+If a single prompt streams more events than `max_event_history` allows,
+`prompt_and_wait()` raises a clear error so hosts can increase the limit instead
+of silently losing earlier events.
+
+Prompt lifecycle collection is intentionally single-flight. Only one of
+`prompt_and_wait()`, `wait_for_idle()`, or `collect_events()` may be active at a
+time on a client instance. If a host needs concurrent orchestration, use separate
+`RpcClient` instances instead of overlapping lifecycle waiters on one session.
+
 ## Host-Owned Custom Tools
 
 RPC hosts can expose custom tools to the agent with JSON Schema metadata. The
-Python helper keeps the wire format simple while still giving the handler a
-typed signature:
+Python helper keeps the payload simple while still giving the handler a typed
+signature:
 
 ```python
 from typing import TypedDict
@@ -140,14 +239,14 @@ with RpcClient(
 ```
 
 If you want runtime conversion into a richer Python type, pass `decode=` to
-`host_tool(...)`. That lets you keep the JSON Schema contract on the wire while
-parsing the incoming argument object into a dataclass or model in the handler.
+`host_tool(...)`. That lets you keep the JSON Schema contract while parsing the
+incoming argument object into a dataclass or model in the handler.
 
 ## Host-Owned URI Schemes
 
 Hosts can also expose custom URL schemes that behave like virtual files.
-Registered schemes are routed through the agent's `read` (and `write`) tools
-over the same RPC transport — handlers do the actual I/O on the Python side:
+Registered schemes are routed through the agent's `read` and `write` tools over
+the same gRPC stream; handlers do the actual I/O on the Python side:
 
 ```python
 from omp_rpc import RpcClient, host_uri
@@ -156,38 +255,38 @@ rows: dict[str, str] = {"42": "id=42\nname=Alice\n"}
 
 
 def read_row(url: str, _ctx) -> str:
-	row_id = url.removeprefix("db://users/")
-	return rows[row_id]
+    row_id = url.removeprefix("db://users/")
+    return rows[row_id]
 
 
 def write_row(url: str, content: str, _ctx) -> None:
-	row_id = url.removeprefix("db://users/")
-	rows[row_id] = content
+    row_id = url.removeprefix("db://users/")
+    rows[row_id] = content
 
 
 with RpcClient(
-	no_session=True,
-	host_uris=(
-		host_uri(
-			scheme="db",
-			description="Virtual db row files",
-			read=read_row,
-			write=write_row,
-		),
-	),
+    no_session=True,
+    host_uris=(
+        host_uri(
+            scheme="db",
+            description="Virtual db row files",
+            read=read_row,
+            write=write_row,
+        ),
+    ),
 ) as client:
-	client.prompt_and_wait("Read db://users/42 and rewrite it with name=Bob")
+    client.prompt_and_wait("Read db://users/42 and rewrite it with name=Bob")
 ```
 
-Schemes registered as read-only (no `write=`) reject `write` calls with a
-clear error. The agent's `edit` tool does not target host URIs — hosts that
-want mutation expose `write` and the model uses the `write` tool with the
-full replacement content.
+Schemes registered as read-only (no `write=`) reject `write` calls with a clear
+error. The agent's `edit` tool does not target host URIs; hosts that want
+mutation expose `write` and the model uses the `write` tool with full replacement
+content.
 
 ## Extension UI Requests
 
-Extensions in RPC mode can ask the host for input. Those requests are available as
-typed `ExtensionUiRequest` instances:
+Extensions in RPC mode can ask the host for input. Those requests are available
+as typed `ExtensionUiRequest` instances:
 
 ```python
 request = client.next_ui_request(timeout=5.0)
@@ -214,42 +313,22 @@ That helper ignores passive UI notifications (`notify`, `setStatus`, `setWidget`
 
 ## Error Handling and Retained History
 
-The client now surfaces more of the transport edge cases that the wire protocol
-allows:
+The client surfaces transport and runtime edge cases through typed errors and
+history collections:
 
-- id-less `parse` and unknown-command failures are correlated back to the
-  waiting request when they can be matched unambiguously
+- id-less `parse` and unknown-command failures are correlated back to the waiting
+  request when they can be matched unambiguously
 - late `prompt` / `abort_and_prompt` scheduling failures cause
   `prompt_and_wait()` and `wait_for_idle()` to raise instead of timing out
 - unmatched background error responses are exposed through
   `client.protocol_errors` and `client.on_protocol_error(...)`
-- listener exceptions no longer kill the stdout reader thread; they are exposed
-  through `client.listener_errors` and `client.on_listener_error(...)`
-
-For long-lived hosts, retained event and stderr history is bounded by default:
-
-```python
-from omp_rpc import RpcClient
-
-with RpcClient(max_event_history=20_000, max_stderr_chunks=256) as client:
-    ...
-```
-
-If a single prompt streams more events than `max_event_history` allows,
-`prompt_and_wait()` raises a clear error so hosts can increase the limit instead
-of silently losing earlier events.
-
-Prompt lifecycle collection is intentionally single-flight. Only one of
-`prompt_and_wait()`, `wait_for_idle()`, or `collect_events()` may be active at a
-time on a client instance. If a host needs concurrent orchestration, use
-separate `RpcClient` instances instead of overlapping lifecycle waiters on one
-session.
+- listener exceptions are exposed through `client.listener_errors` and
+  `client.on_listener_error(...)`
 
 ## Text Helpers
 
-`assistant_text()` and `message_text()` now return visible text blocks only.
-If a host explicitly needs reasoning text too, use the `*_with_thinking`
-helpers:
+`assistant_text()` and `message_text()` return visible text blocks only. If a
+host explicitly needs reasoning text too, use the `*_with_thinking` helpers:
 
 ```python
 from omp_rpc import assistant_text, assistant_text_with_thinking
@@ -258,7 +337,13 @@ visible = assistant_text(message)
 full = assistant_text_with_thinking(message)
 ```
 
+## Migration Break
+
+This release intentionally breaks from the previous JSONL/stdin/protocol-v2/chunk/stdout transport. Remove assumptions about stdin/stdout framing, protocol-v2 negotiation, rpc_chunk reassembly, and unauthenticated process pipes; the supported live transport is authenticated loopback h2c gRPC through `AgentService.Connect`.
+
 ## Protocol Reference
 
-The canonical wire protocol still lives in the repo at
+The canonical schema lives at
+[`packages/grpc/proto/omp_rpc.proto`](../../packages/grpc/proto/omp_rpc.proto);
+the full transport and application protocol reference is
 [`docs/rpc.md`](../../docs/rpc.md).
