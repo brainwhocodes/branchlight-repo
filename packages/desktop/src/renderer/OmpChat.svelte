@@ -939,13 +939,6 @@
   }
 
   function showError(error: unknown): void { errorMessage = error instanceof Error ? error.message : String(error); }
-  let windowMaximized = false;
-  function minimizeWindow(): void { void window.branchlight.minimizeWindow().catch(showError); }
-  async function toggleMaximizeWindow(): Promise<void> {
-    try { windowMaximized = await window.branchlight.toggleMaximizeWindow(); }
-    catch (error) { showError(error); }
-  }
-  function closeWindow(): void { void window.branchlight.closeWindow().catch(showError); }
   function formatMessage(value: unknown): string { return typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "[message]"; }
   function handleTranscriptClick(event: Event): void {
     const target = event.target;
@@ -967,17 +960,7 @@
 </script>
 <svelte:window onclick={handleTranscriptClick} onkeydown={handleTranscriptKeydown} />
 
-<svelte:head><title>OMP Chat · {extensionTitle || (kind === "work" ? "Work" : "Code")}</title></svelte:head>
-
 <div class="app-shell">
-  <header class="window-bar" aria-label="Window bar">
-    <div class="window-drag"><span class="window-bar-title">OMP Chat</span><span class="window-bar-meta">Oh My Pi · local</span></div>
-    <div class="window-controls">
-      <button type="button" aria-label="Minimize OMP Chat" title="Minimize" onclick={minimizeWindow}>−</button>
-      <button type="button" aria-label={windowMaximized ? "Restore OMP Chat" : "Maximize OMP Chat"} title={windowMaximized ? "Restore" : "Maximize"} aria-pressed={windowMaximized} onclick={() => void toggleMaximizeWindow()}>□</button>
-      <button type="button" class="close-window" aria-label="Close OMP Chat" title="Close" onclick={closeWindow}>×</button>
-    </div>
-  </header>
   <header class="topbar">
     <div class="brand"><BranchMark size={28} /><div><strong>OMP Chat</strong><span>Oh My Pi runtime</span></div></div>
     <div class="mode-tabs" role="tablist" aria-label="Session type">

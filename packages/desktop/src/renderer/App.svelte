@@ -322,7 +322,7 @@
 	</header>
 
 	<div class="tab-strip">
-		<nav class="workspace-tabs" role="tablist" aria-label="Workspace tabs">
+		<div class="workspace-tabs" role="tablist" aria-label="Workspace tabs">
 			<button
 				type="button"
 				class="workspace-tab chat-tab-button"
@@ -360,7 +360,7 @@
 					>×</button>
 				</div>
 			{/each}
-		</nav>
+		</div>
 		<button type="button" class="new-browser" aria-label="Open browser tab" title="Open browser tab (Ctrl+T)" disabled={!hydrated} onclick={() => void addBrowserTab()}>
 			<AddSquare size={18} aria-hidden="true" />
 		</button>
@@ -562,9 +562,7 @@
 	.chat-stage :global(.app-shell) {
 		height: 100%;
 		min-height: 0;
-		grid-template-rows: auto minmax(0, 1fr);
 	}
-	.chat-stage :global(.window-bar) { display: none; }
 	.chat-stage :global(.workspace-grid),
 	.chat-stage :global(.settings-page) { min-height: 0; }
 

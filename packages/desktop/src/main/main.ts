@@ -58,6 +58,24 @@ async function ensureDefaultWorkspace(client: WorkspaceClient): Promise<void> {
 	}
 
 	const workspaceId = document.workspaces[0]?.id ?? DEFAULT_WORKSPACE_ID;
+	for (const profileId of ["profile-codex", "profile-claude"] as const) {
+		if (!document.agentProfiles.some(item => item.id === profileId)) continue;
+		if (
+			document.agents.some(item => item.profileId === profileId) ||
+			document.terminals.some(item => item.profileId === profileId)
+		) {
+			continue;
+		}
+		document = await executeBootstrapCommand(client, {
+			version: 1,
+			commandId: `profile-retire-${profileId}`,
+			workspaceId,
+			expectedRevision: document.revision,
+			issuedAt: 1,
+			type: "profile.delete",
+			payload: { id: profileId },
+		});
+	}
 	const defaultProfiles = [
 		{ id: "profile-omp", name: "Oh My Pi", protocol: "omp" as const, config: {}, capabilityIds: [] },
 	];
