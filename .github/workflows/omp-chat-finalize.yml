@@ -125,7 +125,27 @@ jobs:
 
           bun install --frozen-lockfile
           bun --cwd=packages/desktop run check
-          bun --cwd=packages/natives run build
+
+          set -euo pipefail
+          tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
+          curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
+          mkdir -p packages/natives/native
+          cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" packages/natives/native/
+          cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" packages/natives/native/
+
+          cat > "$RUNNER_TEMP/smoke-addons.js" <<'EOF'
+          for (const file of process.argv.slice(2)) {
+            const addon = require(file);
+            if (!addon || Object.keys(addon).length === 0) {
+              console.error(`addon failed to load: ${file}`);
+              process.exit(1);
+            }
+          }
+          EOF
+          bun "$RUNNER_TEMP/smoke-addons.js" \
+            "$PWD/packages/natives/native/pi_natives.linux-x64-baseline.node" \
+            "$PWD/packages/natives/native/pi_natives.linux-x64-modern.node"
+
           bun --cwd=packages/desktop run test
           bun --cwd=packages/desktop run backend:build
 
