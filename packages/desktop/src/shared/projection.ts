@@ -2,15 +2,9 @@ import type { SessionKind, TimelineFileChange, TimelineItem } from "./contracts"
 
 export function projectTimeline(kind: SessionKind, items: readonly TimelineItem[]): TimelineItem[] {
 	if (kind === "code") return [...items];
-	return items.map(item => {
-		if (item.kind !== "tool") return item;
-		return {
-			...item,
-			args: undefined,
-			result: undefined,
-			detail: item.toolName === "generate_image" ? item.detail : undefined,
-		};
-	});
+	return items.map(item =>
+		item.kind === "tool" ? { ...item, args: undefined, result: undefined, detail: undefined } : item,
+	);
 }
 
 export function changedFiles(items: readonly TimelineItem[]): TimelineFileChange[] {

@@ -60,8 +60,6 @@ async function ensureDefaultWorkspace(client: WorkspaceClient): Promise<void> {
 	const workspaceId = document.workspaces[0]?.id ?? DEFAULT_WORKSPACE_ID;
 	const defaultProfiles = [
 		{ id: "profile-omp", name: "Oh My Pi", protocol: "omp" as const, config: {}, capabilityIds: [] },
-		{ id: "profile-codex", name: "Codex", protocol: "acp" as const, config: {}, capabilityIds: [] },
-		{ id: "profile-claude", name: "Claude Code", protocol: "terminal" as const, config: {}, capabilityIds: [] },
 	];
 
 	for (const profile of defaultProfiles) {
