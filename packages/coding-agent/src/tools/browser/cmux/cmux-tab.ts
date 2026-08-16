@@ -652,7 +652,7 @@ export class CmuxTab {
 		// `browser.url.get` (never the possibly-stale `#lastUrl`), then poll for a change
 		// from it (mirroring headless `page.waitForNavigation` intent) and optionally settle
 		// on the requested load state. Start it BEFORE the click/submit that navigates; after
-		// a completed nav it times out like puppeteer does.
+		// a completed nav it times out like Playwright's waitForNavigation does.
 		const baseline = (await this.#request(
 			"browser.url.get",
 			{},

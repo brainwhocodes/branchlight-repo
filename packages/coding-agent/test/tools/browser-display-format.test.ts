@@ -30,4 +30,24 @@ describe("browser renderer: display-only streaming formatting", () => {
 		expect(rendered).not.toContain("run();finish();");
 		expect(args.code).toBe(source);
 	});
+
+	it("reports the resolved browser kind instead of stale requested relay args", () => {
+		const rendered = Bun.stripANSI(
+			toolRenderers.browser
+				.renderResult(
+					{
+						content: [{ type: "text", text: 'Opened tab "Research Docs"' }],
+						details: { action: "open", name: "Research Docs", browser: "connected" },
+					},
+					{ expanded: false, isPartial: false },
+					theme,
+					{ action: "open", name: "Research Docs", app: { relay: true } },
+				)
+				.render(120)
+				.join("\n"),
+		);
+
+		expect(rendered).toContain("connected");
+		expect(rendered).not.toContain("relay");
+	});
 });

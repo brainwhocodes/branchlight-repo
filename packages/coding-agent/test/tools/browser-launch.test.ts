@@ -3,43 +3,39 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	buildBrowserLaunchSpec,
 	chromiumExecutableProbeForTest,
-	stealthIgnoreDefaultArgsForTest,
 	systemChromiumCandidatesForTest,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const EXECUTABLE_PROBE = path.resolve(import.meta.dir, "../fixtures/browser-executable-probe.ts");
 
-const AUTOMATION_FLAG = "--enable-automation";
+describe("browser launch specification", () => {
+	it("owns Chromium arguments without automation or fixed-port defaults", async () => {
+		const tempDir = TempDir.createSync("@browser-launch-spec-");
+		try {
+			const executablePath = path.join(tempDir.path(), "chrome");
+			const userDataDir = path.join(tempDir.path(), "profile");
+			const spec = await buildBrowserLaunchSpec({
+				headless: true,
+				executablePath,
+				userDataDir,
+				viewport: { width: 1200, height: 700 },
+				args: ["--remote-debugging-port=9222", "--custom-switch"],
+			});
 
-const EDGE_EXECUTABLE_PATHS = [
-	"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-	"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-	"/usr/bin/microsoft-edge-stable",
-] as const;
-
-const CHROME_EXECUTABLE_PATHS = [
-	"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-	"/usr/bin/chromium",
-] as const;
-
-describe("browser launch stealth defaults", () => {
-	it("keeps Puppeteer's automation default for Microsoft Edge executables", () => {
-		for (const executablePath of EDGE_EXECUTABLE_PATHS) {
-			const ignoreDefaultArgs = stealthIgnoreDefaultArgsForTest(executablePath);
-
-			expect(ignoreDefaultArgs).not.toContain(AUTOMATION_FLAG);
-			expect(ignoreDefaultArgs).toContain("--disable-extensions");
-		}
-	});
-
-	it("continues filtering Puppeteer's automation default for Chrome and Chromium executables", () => {
-		for (const executablePath of CHROME_EXECUTABLE_PATHS) {
-			const ignoreDefaultArgs = stealthIgnoreDefaultArgsForTest(executablePath);
-
-			expect(ignoreDefaultArgs).toContain(AUTOMATION_FLAG);
+			expect(spec.executablePath).toBe(executablePath);
+			expect(spec.userDataDir).toBe(userDataDir);
+			expect(spec.ownsUserDataDir).toBe(false);
+			expect(spec.args).toContain("--remote-debugging-port=0");
+			expect(spec.args).not.toContain("--remote-debugging-port=9222");
+			expect(spec.args).toContain("--headless=new");
+			expect(spec.args).toContain("--window-size=1200,700");
+			expect(spec.args).toContain("--custom-switch");
+			expect(spec.args).not.toContain("--enable-automation");
+		} finally {
+			await tempDir.remove();
 		}
 	});
 });
@@ -138,7 +134,7 @@ describe("browser executable selection", () => {
 		}
 	});
 
-	it("honors PUPPETEER_EXECUTABLE_PATH before a detected Windows system Chrome", async () => {
+	it("honors OMP_BROWSER_EXECUTABLE_PATH before a detected Windows system Chrome", async () => {
 		const tempDir = TempDir.createSync("@browser-executable-");
 		try {
 			const override = path.join(tempDir.path(), "chrome-headless-shell.exe");
@@ -153,7 +149,7 @@ describe("browser executable selection", () => {
 					ProgramFiles: tempDir.path(),
 					"ProgramFiles(x86)": path.join(tempDir.path(), "missing-x86"),
 					LOCALAPPDATA: path.join(tempDir.path(), "missing-local"),
-					PUPPETEER_EXECUTABLE_PATH: override,
+					OMP_BROWSER_EXECUTABLE_PATH: override,
 				},
 				stdout: "pipe",
 				stderr: "pipe",

@@ -2,12 +2,11 @@
  * HTTP + WebSocket server for the browser relay.
  *
  * Impersonates Chrome's CDP discovery endpoint so the omp browser tool (and
- * any puppeteer client) can connect with a plain `browserURL`:
+ * any Playwright 1.62.1 CDP client) can connect with a plain `browserURL`:
  * - `GET /json/version` → 200 with `webSocketDebuggerUrl` once the extension
  *   is connected, 503 before that (clients like `waitForCdp` keep polling).
  * - `GET /json` / `/json/list` → attachable page targets (debugging aid).
- * - `WS /cdp` → downstream CDP clients (puppeteer).
- * - `WS /ext` → the Chrome extension (token-gated when configured).
+ * - `WS /cdp` → downstream Playwright/CDP clients.
  *
  * Binds loopback only: anything that can reach this port can drive the
  * user's logged-in browser.
@@ -122,7 +121,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 		},
 	});
 
-	// Puppeteer connections go silent while the agent is idle; protocol-level
+	// Playwright/CDP connections go silent while the agent is idle; protocol-level
 	// pings count as activity and keep them under the idle timeout.
 	const keepalive = setInterval(() => {
 		for (const ws of sockets) ws.ping();

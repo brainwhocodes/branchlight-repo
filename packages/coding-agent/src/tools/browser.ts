@@ -48,7 +48,9 @@ const DEFAULT_TAB_NAME = "main";
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
-	"relay?": type("boolean").describe("drive the user's own tabs via the omp browser relay"),
+	"relay?": type("boolean").describe(
+		"drive the user's external Chrome tabs via the omp browser relay; not Branchlight panes",
+	),
 	"args?": type("string[]").describe("extra cli args"),
 	"target?": type("string").describe("substring to pick a window"),
 });
@@ -98,16 +100,26 @@ export function resolveBrowserKind(params: BrowserParams, session: ToolSession):
 		const exe = resolveToCwd(app.path, session.cwd);
 		return { kind: "spawned", path: exe };
 	}
+	const inheritedCdpUrl = process.env.PI_BROWSER_CDP_URL?.trim();
 	const relayUrl = session.settings.get("browser.relayUrl") as string | undefined;
-	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
-	// final kill switch (a relay that is down would otherwise brick the tool).
+	// Explicit app.relay wins over configured backends;
+	// PI_BROWSER_RELAY stays the final kill switch (a relay that is down would
+	// otherwise brick the tool).
 	if (app?.relay) {
 		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl });
 		if (relayKind) return relayKind;
 	}
-	const inheritedCdpUrl = process.env.PI_BROWSER_CDP_URL?.trim();
+	const cmuxKind = resolveCmuxKind({
+		settingEnabled: session.settings.get("browser.cmux") as boolean | undefined,
+	});
+	if (cmuxKind) {
+		return cmuxKind;
+	}
 	if (inheritedCdpUrl) {
 		return { kind: "connected", cdpUrl: inheritedCdpUrl.replace(/\/+$/, "") };
+	}
+	if (process.env.BRANCHLIGHT_TERMINAL === "1") {
+		return { kind: "connected", cdpUrl: "http://127.0.0.1:9222" };
 	}
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback
@@ -124,12 +136,7 @@ export function resolveBrowserKind(params: BrowserParams, session: ToolSession):
 	if (configuredCdpUrl) {
 		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
 	}
-	const cmuxKind = resolveCmuxKind({
-		settingEnabled: session.settings.get("browser.cmux") as boolean | undefined,
-	});
-	if (cmuxKind) {
-		return cmuxKind;
-	}
+
 	const headless = session.settings.get("browser.headless") as boolean;
 	return { kind: "headless", headless };
 }
@@ -321,7 +328,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 									deviceScaleFactor: params.viewport.scale,
 								}
 							: undefined,
-						target: resolveBranchlightBrowserTarget(name, params.app?.target),
+						target: params.app?.target,
 						timeoutMs,
 						dialogs: params.dialogs,
 						signal: openSignal,
@@ -427,9 +434,6 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		return toolResult(details).content(content).done();
 	}
 }
-export function resolveBranchlightBrowserTarget(name: string, target?: string): string | undefined {
-	return target ?? (process.env.BRANCHLIGHT_TERMINAL === "1" && name !== DEFAULT_TAB_NAME ? name : undefined);
-}
 
 /** Persist over-cap browser run output as a session artifact; mirrors the bash minimizer's save path. */
 async function saveBrowserOutputArtifact(session: ToolSession, fullText: string): Promise<string | undefined> {
@@ -444,7 +448,7 @@ async function saveBrowserOutputArtifact(session: ToolSession, fullText: string)
 }
 
 function describeBrowser(handle: BrowserHandle): string {
-	if (!("browser" in handle)) {
+	if ("client" in handle) {
 		return `cmux browser (${handle.kind.surface ?? "split"})`;
 	}
 	switch (handle.kind.kind) {
@@ -453,9 +457,9 @@ function describeBrowser(handle: BrowserHandle): string {
 		case "spawned":
 			return `spawned ${handle.kind.path} (pid ${handle.pid ?? "?"})`;
 		case "connected":
-			return `connected ${handle.cdpUrl ?? handle.kind.cdpUrl}`;
+			return `connected ${handle.cdpEndpoint}`;
 		case "relay":
-			return `relay ${handle.cdpUrl ?? handle.kind.cdpUrl}`;
+			return `relay ${handle.cdpEndpoint}`;
 	}
 }
 

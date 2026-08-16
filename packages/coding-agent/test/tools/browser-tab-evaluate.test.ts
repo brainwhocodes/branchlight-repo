@@ -3,6 +3,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { getTabsMapForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { connectOverCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -42,7 +43,68 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 		}
 	}, 30_000);
 
-	it("clears request interception and held requests between runs, including thrown runs", async () => {
+	it("translates aria, text, xpath, pierce, and Playwright selectors with strict diagnostics", async () => {
+		const tool = new BrowserTool(makeSession());
+		const name = `selector-contract-${process.pid}`;
+		const html = encodeURIComponent(`
+			<label>Email <input aria-label="Email"></label>
+			<button id="text">Submit</button>
+			<button id="xpath">XPath action</button>
+			<div id="host"></div>
+			<button>Duplicate</button><button>Duplicate</button>
+			<script>
+				globalThis.__clicked = [];
+				document.querySelector("#text").onclick = () => globalThis.__clicked.push("text");
+				document.querySelector("#xpath").onclick = () => globalThis.__clicked.push("xpath");
+				const root = document.querySelector("#host").attachShadow({ mode: "open" });
+				root.innerHTML = '<button id="shadow">Shadow action</button>';
+				root.querySelector("#shadow").onclick = () => globalThis.__clicked.push("shadow");
+			</script>
+		`);
+		try {
+			await tool.execute("open", { action: "open", name, url: `data:text/html,${html}` });
+			const result = await tool.execute("run", {
+				action: "run",
+				name,
+				code: `
+					await tab.fill('aria/Email[role="textbox"]', "initial");
+					const email = await tab.waitFor("aria/Email");
+					await email.fill("hello");
+					await tab.type("aria/Email", "@example.test");
+					await tab.click("text/Submit");
+					await tab.click("xpath///button[@id='xpath']");
+					await tab.click("pierce/#shadow");
+					await tab.click('button:has-text("Submit")');
+					let strict = "";
+					try {
+						await tab.click("text/Duplicate");
+					} catch (error) {
+						strict = error.message;
+					}
+					let browserClose = "";
+					try {
+						await browser.close();
+					} catch (error) {
+						browserClose = error.message;
+					}
+					const data = await tab.evaluate(() => ({
+						value: document.querySelector("input").value,
+						clicked: globalThis.__clicked,
+					}));
+					return { ...data, strict, browserClose };
+				`,
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain('"value": "hello@example.test"');
+			expect(text).toContain('"shadow"');
+			expect(text).toContain("strict mode violation");
+			expect(text).toContain("connected browser is shared");
+		} finally {
+			await tool.execute("close", { action: "close", name, kill: true });
+		}
+	}, 30_000);
+
+	it("clears request routes and held requests between runs, including thrown runs", async () => {
 		const server = Bun.serve({
 			port: 0,
 			fetch(request) {
@@ -70,8 +132,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 					name,
 					code: `
 						globalThis.__requestListenerBaseline = page.listenerCount("request");
-						await page.setRequestInterception(true);
-						page.on("request", request => void request.abort());
+						await page.route("**/*", route => route.abort());
 						throw new Error("setup failed");
 					`,
 				});
@@ -100,18 +161,17 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 				name,
 				code: `
 					let heldSeen = false;
-					await page.setRequestInterception(true);
-					page.on("request", request => {
-						const pathname = new URL(request.url()).pathname;
+					await page.route("**/*", route => {
+						const pathname = new URL(route.request().url()).pathname;
 						if (pathname === "/held") {
 							heldSeen = true;
 							return;
 						}
 						if (pathname === "/mock") {
-							void request.respond({ status: 200, body: "mocked" });
+							void route.fulfill({ status: 200, body: "mocked" });
 							return;
 						}
-						void request.continue();
+						void route.continue();
 					});
 					await tab.evaluate(() => {
 						globalThis.__heldFetch = fetch("/held").then(async response => await response.text());
@@ -151,7 +211,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 		}
 	}, 30_000);
 
-	it("fires a once request handler exactly once and clears it between runs", async () => {
+	it("applies a one-shot route exactly once and clears it between runs", async () => {
 		const server = Bun.serve({
 			port: 0,
 			fetch(request) {
@@ -177,16 +237,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 				code: `
 					const baseline = page.listenerCount("request");
 					globalThis.__requestListenerBaseline = baseline;
-					await page.setRequestInterception(true);
-					page.once("request", request => {
-						if (new URL(request.url()).pathname === "/mock") {
-							void request.respond({ status: 200, body: "mocked-once" });
-							return;
-						}
-						void request.continue();
-					});
+					await page.route("**/*", route => {
+						void route.fulfill({ status: 200, body: "mocked-once" });
+					}, { times: 1 });
 					const body = await tab.evaluate(async () => await (await fetch("/mock")).text());
-					// A once handler that fired must unregister from the emitter, not just the tracker.
 					return { body, leaked: page.listenerCount("request") - baseline };
 				`,
 			});
@@ -434,16 +488,19 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 					action: "run",
 					name,
 					code: `
-						await page.setRequestInterception(true);
-						page.setRequestInterception = async () => {
+						let routeStarted = false;
+						await page.route("**/*", async route => {
+							routeStarted = true;
 							await Bun.sleep(50);
-						};
+						});
+						tab.evaluate(() => void fetch("https://example.test/cleanup"));
 						const continuationStarted = Promise.withResolvers();
 						void tab.title().then(async () => {
 							continuationStarted.resolve();
 							await Bun.sleep(10);
 							throw new Error("cleanup continuation failed");
 						});
+						await wait(() => routeStarted);
 						await continuationStarted.promise;
 						return "incorrect success";
 					`,
@@ -507,8 +564,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 			await tool.execute("open", { action: "open", name, url });
 			const tabSession = getTabsMapForTest().get(name);
 			if (tabSession?.backend !== "worker") throw new Error("Worker tab was not created");
-			const pages = await tabSession.browser.browser.pages();
-			const targetPage = pages.find(page => page.url() === url);
+			const browser = await connectOverCdp(tabSession.browser.cdpEndpoint);
+			const context = browser.contexts()[0];
+			if (!context) throw new Error("No browser context");
+			const targetPage = context.pages().find(page => page.url() === url);
 			if (!targetPage) throw new Error(`Target page was not found for ${url}`);
 
 			const started = targetPage.waitForFunction("document.documentElement.dataset.floating === 'true'", {
@@ -522,7 +581,6 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 			const startedHandle = await started;
 			await startedHandle.dispose();
 			await targetPage.close();
-
 			const result = await run;
 			expect(result.content).toEqual([{ type: "text", text: "survived" }]);
 		} finally {

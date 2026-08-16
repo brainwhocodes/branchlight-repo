@@ -45,8 +45,7 @@ export interface SessionSnapshot {
 export type WorkerInitPayload =
 	| {
 			mode: "headless";
-			browserWSEndpoint: string;
-			safeDir: string;
+			cdpEndpoint: string;
 			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
 			url?: string;
@@ -55,17 +54,15 @@ export type WorkerInitPayload =
 	  }
 	| {
 			mode: "attach";
-			browserWSEndpoint: string;
-			safeDir: string;
+			cdpEndpoint: string;
 			targetId: string;
 			dialogs?: "accept" | "dismiss";
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 			timeoutMs: number;
 			/**
-			 * Post-timeout recycle: before adopting the page, dismiss any open JS dialog and
-			 * stop a pending navigation so a blocked target cannot stall worker init (which
-			 * previously force-killed the tab). Never set for first-time Electron attach.
+			 * Post-timeout recycle: stop pending page work before exact adoption.
+			 * Never set for first-time attached-browser acquisition.
 			 */
 			recover?: boolean;
 			/**

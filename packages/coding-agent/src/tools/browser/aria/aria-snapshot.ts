@@ -1,4 +1,4 @@
-import type { ElementHandle, JSHandle, Page } from "puppeteer-core";
+import type { ElementHandle, JSHandle, Page } from "playwright-core";
 import { ToolError } from "../../tool-errors";
 import ariaBundle from "./aria-snapshot.bundle.txt" with { type: "text" };
 // `aria-snapshot.bundle.txt` is a generated, committed artifact: Playwright's
@@ -19,23 +19,21 @@ export interface AriaSnapshotOptions {
  * page CSP never applies. They run the generated Playwright ARIA-snapshot bundle
  * (CJS, see scripts/generate-aria-snapshot.ts) in a throwaway module scope.
  *
- * Puppeteer serializes these functions to a CDP `Runtime.evaluate` in the page's
- * MAIN world (the only world where the bundle's `_ariaRef` ref expandos live —
- * isolated-world locators/query-handlers cannot see them). Nothing is installed
- * on `window`; the only footprint is the `_ariaRef` markers the snapshot writes,
- * which are the price of actionable `[ref=eN]` ids.
+ * Playwright serializes these functions to a CDP `Runtime.callFunctionOn` in
+ * the page's MAIN world (the only world where the bundle's `_ariaRef` ref
+ * expandos live — isolated-world locators cannot see them). Nothing is
+ * installed on `window`; the only footprint is the `_ariaRef` markers the
+ * snapshot writes, which are the price of actionable `[ref=eN]` ids.
  */
-function buildEvaluator(params: string, call: string): (...args: unknown[]) => unknown {
-	return new Function(
-		...params.split(",").map(p => p.trim()),
-		`var module = { exports: {} };\n${ariaBundle}\nreturn module.exports.${call};`,
-	) as unknown as (...args: unknown[]) => unknown;
+function buildEvaluator(call: string): (arg: unknown) => unknown {
+	return new Function("arg", `var module = { exports: {} };\n${ariaBundle}\nreturn module.exports.${call};`) as (
+		arg: unknown,
+	) => unknown;
 }
 
-// Handles (root) must stay top-level args: Puppeteer only unwraps JSHandles
-// passed positionally to page.evaluate, never ones nested inside an object.
-const evaluateAriaSnapshot = buildEvaluator("root, request", "ariaSnapshot(root, request)");
-const evaluateResolveRef = buildEvaluator("ref", "resolveAriaRef(ref)");
+// Playwright accepts one serializable argument, including nested handles.
+const evaluateAriaSnapshot = buildEvaluator("ariaSnapshot(arg.root, arg.request)");
+const evaluateResolveRef = buildEvaluator("resolveAriaRef(arg.ref)");
 
 /**
  * Capture a Playwright-format ARIA snapshot of `root` (or the whole document when
@@ -49,7 +47,7 @@ export async function captureAriaSnapshot(
 	options: AriaSnapshotOptions = {},
 ): Promise<string> {
 	const request = { depth: options.depth, boxes: options.boxes };
-	return (await page.evaluate(evaluateAriaSnapshot as never, root as never, request as never)) as string;
+	return (await page.evaluate(evaluateAriaSnapshot, { root, request })) as string;
 }
 
 /**
@@ -58,13 +56,13 @@ export async function captureAriaSnapshot(
  * sees the `_ariaRef` expandos the snapshot wrote.
  */
 export async function resolveAriaRefHandle(page: Page, ref: string): Promise<ElementHandle | null> {
-	const handle = (await page.evaluateHandle(evaluateResolveRef as never, ref as never)) as JSHandle;
+	const handle = (await page.evaluateHandle(evaluateResolveRef, { ref })) as JSHandle;
 	const element = handle.asElement();
 	if (!element) {
 		await handle.dispose().catch(() => undefined);
 		return null;
 	}
-	return element as ElementHandle;
+	return element;
 }
 
 const ARIA_REF_PREFIXES = ["aria-ref=", "aria-ref/", "ariaref/"];
@@ -122,7 +120,7 @@ export function parseAriaRefSelector(selector: string): string | null {
  * `browser.eval` RPC takes a script string and returns the completion value (it
  * has no ElementHandle to pass in). The script resolves `selector` via
  * `document.querySelector` in-page (CSS selectors only) or falls back to the
- * whole document. Like the puppeteer path it installs nothing on `window`.
+ * whole document. Like the Playwright path it installs nothing on `window`.
  */
 export function buildAriaSnapshotScript(selector: string | undefined, options: AriaSnapshotOptions = {}): string {
 	const request = { depth: options.depth, boxes: options.boxes };

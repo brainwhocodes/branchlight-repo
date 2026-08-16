@@ -1,6 +1,6 @@
 # browser
 
-> Open, reuse, close, and script browser tabs against project-shared Chromium, CDP-attached apps, the user's Chrome through the OMP Browser Relay, or cmux surfaces.
+> Open, reuse, close, and script browser tabs against project-shared Chromium, CDP-attached apps, Branchlight browser panes, the user's Chrome through the OMP Browser Relay, or cmux surfaces.
 
 ## Source
 - Entry: `packages/coding-agent/src/tools/browser.ts`
@@ -10,12 +10,12 @@
   - `packages/coding-agent/src/tools/browser/tab-worker.ts` — executes `run` code; implements the `tab` helper API.
   - `packages/coding-agent/src/tools/browser/tab-worker-entry.ts` — worker-thread transport bootstrap.
   - `packages/coding-agent/src/tools/browser/registry.ts` — browser-handle registry keyed by browser kind.
-  - `packages/coding-agent/src/tools/browser/launch.ts` — Puppeteer loading, Chromium resolution/download, headless launch, stealth injection.
+  - `packages/coding-agent/src/tools/browser/launch.ts` — Playwright 1.62.1 loading, Chromium resolution/download, headless launch, stealth injection.
   - `packages/coding-agent/src/tools/browser/shared-daemon.ts` — project-shared broker-owned Chromium (ensure/attach over the daemon broker).
   - `packages/coding-agent/src/tools/browser/attach.ts` — CDP attach/reuse, target picking, spawned-app process handling.
   - `packages/coding-agent/src/tools/browser/tab-protocol.ts` — worker init/run/result message schema.
   - `packages/coding-agent/src/tools/browser/readable.ts` — `tab.extract()` readability extraction.
-  - `packages/coding-agent/src/tools/browser/aria/aria-snapshot.ts` — `captureAriaSnapshot()` (puppeteer/CDP path) and `buildAriaSnapshotScript()` (cmux path); imports the committed `aria-snapshot.bundle.txt`.
+  - `packages/coding-agent/src/tools/browser/aria/aria-snapshot.ts` — `captureAriaSnapshot()` (Playwright/CDP path) and `buildAriaSnapshotScript()` (cmux path); imports the committed `aria-snapshot.bundle.txt`.
   - `packages/coding-agent/src/tools/browser/aria/aria-snapshot.bundle.txt` — generated, committed artifact: Playwright's injected ARIA-snapshot sources (Apache-2.0, (c) Microsoft; ARIA tree + W3C accessible-name computation) bundled to a CJS module. Upstream sources are not vendored into the repo.
   - `packages/coding-agent/scripts/generate-aria-snapshot.ts` — fetches the pinned Playwright sources to a temp dir and bundles them into `aria-snapshot.bundle.txt` (CJS, browser target). Dev-time, network-bound; only the bundle is committed.
   - `packages/coding-agent/src/tools/browser/cmux/rpc.ts` — cmux browser-kind resolution plus snapshot/eval/wait-state helpers for the cmux backend.
@@ -26,20 +26,20 @@
   - `packages/coding-agent/src/tools/browser/relay/{server,bridge,protocol}.ts` — loopback CDP facade and Chrome-extension protocol bridge.
   - `packages/coding-agent/src/eval/js/shared/runtime.ts` — shared `JsRuntime` that executes `run` code (same engine as the `eval` JS tool); both the worker and cmux backends delegate to it.
   - `packages/coding-agent/src/tools/browser/render.ts` — TUI rendering for `open`/`close` status lines and `run` JS cells.
-  - `packages/coding-agent/src/tools/puppeteer/00_stealth_tampering.txt` — mask patched functions/descriptors as native.
-  - `packages/coding-agent/src/tools/puppeteer/01_stealth_activity.txt` — synthesize visibility/focus/scroll activity.
-  - `packages/coding-agent/src/tools/puppeteer/02_stealth_hairline.txt` — fix Modernizr hairline detection.
-  - `packages/coding-agent/src/tools/puppeteer/03_stealth_botd.txt` — spoof `navigator.webdriver`, `window.chrome`, and Chrome fingerprint surfaces.
-  - `packages/coding-agent/src/tools/puppeteer/04_stealth_iframe.txt` — patch iframe `contentWindow`/`srcdoc` behavior.
-  - `packages/coding-agent/src/tools/puppeteer/05_stealth_webgl.txt` — spoof WebGL vendor/renderer/precision.
-  - `packages/coding-agent/src/tools/puppeteer/06_stealth_screen.txt` — normalize screen/viewport/device-pixel-ratio values.
-  - `packages/coding-agent/src/tools/puppeteer/07_stealth_fonts.txt` — spoof local fonts and perturb canvas text rendering.
-  - `packages/coding-agent/src/tools/puppeteer/08_stealth_audio.txt` — spoof audio latency/sample-rate and perturb offline rendering.
-  - `packages/coding-agent/src/tools/puppeteer/09_stealth_locale.txt` — force locale/languages/timezone/date strings.
-  - `packages/coding-agent/src/tools/puppeteer/10_stealth_plugins.txt` — synthesize `navigator.plugins`/`navigator.mimeTypes`.
-  - `packages/coding-agent/src/tools/puppeteer/11_stealth_hardware.txt` — spoof `navigator.hardwareConcurrency`.
-  - `packages/coding-agent/src/tools/puppeteer/12_stealth_codecs.txt` — spoof media codec support.
-  - `packages/coding-agent/src/tools/puppeteer/13_stealth_worker.txt` — carry UA/platform spoofing into `Worker`/`SharedWorker`.
+  - `packages/coding-agent/src/tools/browser/stealth/00_stealth_tampering.txt` — mask patched functions/descriptors as native.
+  - `packages/coding-agent/src/tools/browser/stealth/01_stealth_activity.txt` — synthesize visibility/focus/scroll activity.
+  - `packages/coding-agent/src/tools/browser/stealth/02_stealth_hairline.txt` — fix Modernizr hairline detection.
+  - `packages/coding-agent/src/tools/browser/stealth/03_stealth_botd.txt` — spoof `navigator.webdriver`, `window.chrome`, and Chrome fingerprint surfaces.
+  - `packages/coding-agent/src/tools/browser/stealth/04_stealth_iframe.txt` — patch iframe `contentWindow`/`srcdoc` behavior.
+  - `packages/coding-agent/src/tools/browser/stealth/05_stealth_webgl.txt` — spoof WebGL vendor/renderer/precision.
+  - `packages/coding-agent/src/tools/browser/stealth/06_stealth_screen.txt` — normalize screen/viewport/device-pixel-ratio values.
+  - `packages/coding-agent/src/tools/browser/stealth/07_stealth_fonts.txt` — spoof local fonts and perturb canvas text rendering.
+  - `packages/coding-agent/src/tools/browser/stealth/08_stealth_audio.txt` — spoof audio latency/sample-rate and perturb offline rendering.
+  - `packages/coding-agent/src/tools/browser/stealth/09_stealth_locale.txt` — force locale/languages/timezone/date strings.
+  - `packages/coding-agent/src/tools/browser/stealth/10_stealth_plugins.txt` — synthesize `navigator.plugins`/`navigator.mimeTypes`.
+  - `packages/coding-agent/src/tools/browser/stealth/11_stealth_hardware.txt` — spoof `navigator.hardwareConcurrency`.
+  - `packages/coding-agent/src/tools/browser/stealth/12_stealth_codecs.txt` — spoof media codec support.
+  - `packages/coding-agent/src/tools/browser/stealth/13_stealth_worker.txt` — carry UA/platform spoofing into `Worker`/`SharedWorker`.
 
 ## Inputs
 
@@ -56,10 +56,10 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `url` | `string` | No | Navigate after the tab is ready. Existing reusable tabs also navigate when `url` is supplied. |
-| `viewport` | `{ width: number; height: number; scale?: number }` | No | Requested viewport. For headless launch this becomes the initial viewport; for a page it is applied with `page.setViewport()`. `scale` maps to Puppeteer `deviceScaleFactor`. |
+| `viewport` | `{ width: number; height: number; scale?: number }` | No | Requested viewport for headless tabs. Attached, spawned, and relay pages retain their existing viewport. `scale` is accepted as a compatibility input. |
 | `wait_until` | `"load" \| "domcontentloaded" \| "networkidle0" \| "networkidle2"` | No | Navigation wait condition. Defaults to `"load"` where omitted, including `open` navigation and later `tab.goto(...)`. |
 | `dialogs` | `"accept" \| "dismiss"` | No | Installs a page `dialog` handler that auto-accepts or auto-dismisses dialogs. Omitted means no handler. |
-| `app` | `{ path?: string; cdp_url?: string; relay?: boolean; args?: string[]; target?: string }` | No | Selects browser kind. Explicit `app.cdp_url` wins, then `app.path`, then relay selection. `app.relay: true` opts into the OMP Browser Relay; `app.relay: false` suppresses relay settings for this call. With no explicit app kind, `browser.relay` (overridden by `PI_BROWSER_RELAY`) precedes `browser.cdpUrl`, then cmux when available, then `browser.headless`. `browser.relayUrl` defaults to `http://127.0.0.1:9224`. `args` apply only to spawned `app.path`; `target` selects an attached/spawned/relay page by URL/title substring. |
+| `app` | `{ path?: string; cdp_url?: string; relay?: boolean; args?: string[]; target?: string }` | No | Selects browser kind. Explicit `app.cdp_url` wins, then `app.path`. In a Branchlight terminal, inherited `PI_BROWSER_CDP_URL` is skipped; explicit relay and configured relay/CDP/cmux backends remain eligible, then automation fails closed instead of falling back to headless until the authenticated pane-scoped runtime broker is available. Otherwise `app.relay: true` precedes generic inherited `PI_BROWSER_CDP_URL`; then configured relay, `browser.cdpUrl`, cmux, and headless. `app.relay: false` suppresses configured relay, while `PI_BROWSER_RELAY` overrides relay enablement. `browser.relayUrl` defaults to `http://127.0.0.1:9224`. `args` apply only to spawned `app.path`; `target` selects an attached/spawned/relay page by URL/title substring. |
 
 ### `action: "close"`
 
@@ -93,20 +93,21 @@ The tool returns one result per call; no streaming partial output is emitted fro
 
 ## Flow
 1. `BrowserTool.execute()` (`packages/coding-agent/src/tools/browser.ts`) abort-checks, clamps `timeout` via `clampTimeout("browser", ...)`, defaults `name` to `"main"`, and dispatches on `action`.
-2. `open` resolves browser kind with `resolveBrowserKind()`:
    - `app.cdp_url` → `{ kind: "connected" }` after trimming trailing slashes.
    - `app.path` → `{ kind: "spawned" }` after resolving against session cwd.
+   - with `BRANCHLIGHT_TERMINAL=1`, inherited `PI_BROWSER_CDP_URL` is skipped.
    - `app.relay: true` → relay mode unless `PI_BROWSER_RELAY=0` disables it.
+   - otherwise, outside Branchlight terminal mode, inherited `PI_BROWSER_CDP_URL` → `{ kind: "connected" }`.
    - otherwise, unless `app.relay === false`, `browser.relay` selects relay mode; `PI_BROWSER_RELAY=0|1` is the final setting override and `browser.relayUrl` supplies the endpoint.
    - otherwise, a non-empty `browser.cdpUrl` setting → `{ kind: "connected" }`.
    - otherwise, `resolveCmuxKind()` → `{ kind: "cmux", socketPath, password?, surface? }` when `CMUX_SOCKET_PATH` is set and cmux is enabled (`browser.cmux`, overridable by `PI_BROWSER_CMUX`).
+   - with `BRANCHLIGHT_TERMINAL=1`, if no explicit or configured backend was selected, fail closed until the authenticated pane-scoped runtime broker is connected.
    - otherwise → `{ kind: "headless", headless: session.settings.get("browser.headless") }`.
-3. `open` rejects reusing the same tab name across different browser kinds (`sameBrowserKind()`); callers must close first.
 4. `open` acquires a browser handle through `acquireBrowser()` (`packages/coding-agent/src/tools/browser/registry.ts`):
    - existing connected handle is reused by browser-kind key;
    - headless attaches to the project-shared broker-owned Chromium (`ensureSharedBrowser()`); in a CLI-host process a broker failure is a hard error, while non-CLI hosts (`bun test`, SDK embedding) launch a process-local Chromium via `launchHeadlessBrowser()`;
-   - `connected` waits for `${cdpUrl}/json/version`, then `puppeteer.connect()`;
-   - `relay` auto-starts the machine-global broker-owned server for loopback endpoints in CLI hosts, waits up to 35 seconds for the extension handshake, then attaches through Puppeteer. Remote endpoints and non-CLI hosts must already be serving;
+  - `connected` waits for `${cdpUrl}/json/version`, then calls Playwright `chromium.connectOverCDP()`;
+  - `relay` auto-starts the machine-global broker-owned server for loopback endpoints in CLI hosts, waits up to 35 seconds for the extension handshake, then attaches through Playwright over CDP. Remote endpoints and non-CLI hosts must already be serving;
    - `spawned` first tries `findReusableCdp()`, else kills same-path processes, allocates a free loopback port, spawns the executable with `--remote-debugging-port=<port>`, waits for CDP, then connects;
    - `cmux` connects a `CmuxSocketClient` to the cmux unix socket; existing cmux handles are reused unconditionally (no connection-liveness recheck).
 5. `open` acquires a tab through `acquireTab()` (`packages/coding-agent/src/tools/browser/tab-supervisor.ts`):
@@ -115,7 +116,7 @@ The tool returns one result per call; no streaming partial output is emitted fro
    - reusing with a new `url` navigates by issuing `await tab.goto(...)` through the worker, defaulting to `waitUntil: "load"` when `wait_until` is omitted.
 6. New tabs build a `WorkerInitPayload` in `buildInitPayload()`:
    - headless mode sends `url`, `waitUntil`, `viewport`, `dialogs`, and timeout; the worker defaults missing `waitUntil` to `"load"`.
-   - attached, spawned, and relay modes resolve a page with `pickElectronTarget()`, get its target id, and send `targetId` plus `dialogs`. When no `target` is supplied for connected/relay mode, target selection prefers the visible usable page and screenshots do not activate it; an explicit matcher may select and activate a background page for target-correct pixels.
+   - attached, spawned, and relay modes resolve a page with `pickElectronTarget()`, get its target id, and send `targetId` plus `dialogs`. `app.target` is the only target matcher; Branchlight does not synthesize a matcher from the logical tab name. When no target matcher exists for connected/relay mode, selection prefers the visible usable page and screenshots do not activate it; an explicit matcher may select and activate a background page for target-correct pixels.
 7. `acquireTab()` spawns a dedicated Bun `Worker` from `tab-worker-entry.ts`; if that fails it falls back to inline execution in the main thread (`spawnInlineWorker()`), preserving behavior but losing protection against synchronous infinite loops.
 8. `WorkerCore.#init()` (`packages/coding-agent/src/tools/browser/tab-worker.ts`) connects back to the browser websocket endpoint. Headless mode opens a new page, applies stealth patches, applies viewport, installs dialog handling if requested, and optionally navigates. Attach mode resolves the requested target page and optionally installs dialog handling.
 9. On success the worker sends `ready` with `{ url, title, viewport, targetId }`; the supervisor stores a `TabSession`, increments browser-handle refcount with `holdBrowser()`, and keeps the tab in a process-global `Map<string, TabSession>`.
@@ -151,13 +152,13 @@ The tool returns one result per call; no streaming partial output is emitted fro
    - `tab.waitForNavigation({ waitUntil?, timeout? })`
    - `tab.id(n)`
    - `tab.ref(id)`
-14. Selector handling in `normalizeSelector()` accepts plain CSS and Puppeteer query handlers, and rewrites legacy Playwright-style prefixes `p-text/`, `p-xpath/`, `p-pierce/`, `p-aria/`; other `p-*` prefixes throw a `ToolError`. Playwright-only engines/pseudos (`:has-text()`, `:text()`, `:visible`, `:nth-match()`, `:near()`/`:above()`/…) on a CSS selector throw a `ToolError` pointing at the `text/`/`aria/` equivalents instead of stalling the action timeout.
-15. `tab.observe()` clears the element cache, takes a Puppeteer accessibility snapshot, filters to interactive nodes unless `includeAll`, optionally filters to viewport-visible nodes, assigns numeric ids, caches `ElementHandle`s, and returns URL/title/viewport/scroll metadata plus `elements`.
-15a. `tab.ariaSnapshot()` resolves the optional `selector` (via `normalizeSelector()` → `page.$`, defaulting to the whole document) and runs the generated Playwright ARIA-snapshot bundle (`src/tools/browser/aria/aria-snapshot.bundle.txt`) via `captureAriaSnapshot()`. The bundle is wrapped in a `new Function` built worker-side (so page CSP never applies) and serialized to a CDP `page.evaluate` in the page's **main world**, returning Playwright-format YAML. It always runs in `ai` mode: every node gets a `[ref=eN]` id, clickables get `[cursor=pointer]`, and matched DOM nodes are tagged with an `_ariaRef` expando. Existing `_ariaRef` expandos are cleared before each snapshot so ids renumber deterministically from e1 (the fresh module's counter resets each call); refs stay valid until the next snapshot. The cmux backend uses `buildAriaSnapshotScript()` over `browser.eval` instead (no `ElementHandle`; CSS selectors only for the root).
+14. Selector handling in `normalizeSelector()` accepts plain CSS, Playwright selector engines, and the `aria/`, `text/`, `xpath/`, and `pierce/` namespaces; it rewrites legacy `p-text/`, `p-xpath/`, `p-pierce/`, and `p-aria/` prefixes. Other `p-*` prefixes throw a `ToolError`.
+15. `tab.observe()` clears the element cache, takes a Playwright locator-based accessibility snapshot, filters to interactive nodes unless `includeAll`, optionally filters to viewport-visible nodes, assigns numeric ids, caches `ElementHandle`s, and returns URL/title/viewport/scroll metadata plus `elements`.
+15a. `tab.ariaSnapshot()` resolves the optional `selector` (via `normalizeSelector()` → Playwright `page.locator()`, defaulting to the whole document) and runs the generated Playwright ARIA-snapshot bundle (`src/tools/browser/aria/aria-snapshot.bundle.txt`) via `captureAriaSnapshot()`. The bundle is wrapped in a `new Function` built worker-side (so page CSP never applies) and serialized to a CDP `page.evaluate` in the page's **main world**, returning Playwright-format YAML. It always runs in `ai` mode: every node gets a `[ref=eN]` id, clickables get `[cursor=pointer]`, and matched DOM nodes are tagged with an `_ariaRef` expando. Existing `_ariaRef` expandos are cleared before each snapshot so ids renumber deterministically from e1 (the fresh module's counter resets each call);…
 16. `tab.id(n)` resolves the cached `ElementHandle`, verifies `el.isConnected`, and throws a stale-id error after cache invalidation if the DOM changed or the cache was cleared.
 16a. `tab.ref(id)` resolves a `[ref=eN]` id from the latest `ariaSnapshot()` to a live `ElementHandle` via `resolveAriaRefHandle()` (`page.evaluateHandle` in the main world, walking the document + shadow roots for the matching `_ariaRef`), throwing if no element matches; it accepts a bare `eN` or a prefixed form. Selector helpers recognize `aria-ref=eN`, `aria-ref/eN`, `ariaref/eN`, bare `eN`, and `@eN`. The cmux backend interprets bare `eN` in its own observation-id namespace; in either backend an `eN` selector means the id from the latest page dump.
 17. `tab.goto()` clears the cached element ids before navigating. Any new `tab.observe()` also clears and rebuilds the cache.
-18. `tab.click()` uses a custom retry loop for `text/...` selectors to find an actionable visible match; other selectors use `page.locator(...).click()`. Interactive actions (`click`/`fill`/`type`/`press`/`scroll`/`drag`/`scrollIntoView`/`select`/`uploadFile`) and the `waitFor*` helpers run under a per-op deadline (`min(cellBudget − slack, ceiling)`) threaded into both the puppeteer `signal` and `.setTimeout()`, so a stalled helper aborts the CDP action and rejects with a named `tab.<op> timed out after <ms>ms` that leaves cell budget — never the opaque whole-cell timeout. `goto`/`evaluate` stay uncapped.
+18. `tab.click()` uses a custom retry loop for `text/...` selectors to find an actionable visible match; other selectors use Playwright `page.locator(...).click()`. Interactive actions (`click`/`fill`/`type`/`press`/`scroll`/`drag`/`scrollIntoView`/`select`/`uploadFile`) and the `waitFor*` helpers run under a per-op deadline (`min(cellBudget − slack, ceiling)`) threaded into both the Playwright `signal` and `.setTimeout()`, so a stalled helper aborts the CDP action and rejects with a named `tab.<op> timed out after <ms>ms` that leaves cell budget — never the opaque whole-cell timeout. `goto`/`evaluate` stay uncapped.
 19. `tab.screenshot()` captures the page or selected element as PNG, resizes a model copy, saves under `browser.screenshotDir` or the OS temp directory, returns that path, records metadata, and optionally emits text plus image content.
 20. `display()` calls accumulate in an array. After code finishes, the worker posts `{ displays, returnValue, screenshots }`; `BrowserTool.#run()` appends the return value as trailing text content when not `undefined`.
 21. `close` releases one tab or all tabs via `releaseTab()` / `releaseAllTabs()`. Each tab aborts pending runs, asks the worker to close, waits up to `750` ms for a `closed` ack, terminates the worker, decrements browser refcount, and disposes the browser handle when refcount reaches zero.
@@ -170,12 +171,13 @@ The tool returns one result per call; no streaming partial output is emitted fro
 - **Browser kind**
   - **Headless**: attaches to one project-shared Chromium supervised by the daemon broker (`omp.browser.headless` / `omp.browser.headed` in `hub ps`), applies stealth patches, and creates a fresh page per tab. The daemon stops with the last omp client in the project. Non-CLI hosts launch a private local Chromium instead.
   - **Spawned app (`app.path`)**: reuses an existing CDP-enabled process for that executable when possible; otherwise kills same-path processes, spawns the executable with remote debugging enabled, then attaches. No stealth patches are injected.
-  - **Connected browser (`app.cdp_url`, or the `browser.cdpUrl` setting when the call carries no `app`)**: attaches to an already-running CDP endpoint. No process ownership; close only disconnects.
+  - **Connected browser (`app.cdp_url`, inherited `PI_BROWSER_CDP_URL`, or `browser.cdpUrl`)**: attaches to an already-running CDP endpoint, except inherited endpoints are ignored in Branchlight terminal mode. No process ownership; close disconnects without terminating the browser.
+  - **Branchlight pane**: explicit app and configured relay/CDP/cmux backends remain available; with none selected, browser automation fails closed rather than falling back to a global Electron CDP endpoint, title, or URL matching.
   - **OMP Browser Relay (`app.relay`, or `browser.relay`)**: attaches to the user's own Chrome tabs through the loopback relay and its MV3 extension. Install once with `omp browser-relay install`. CLI hosts auto-start the fixed-port relay daemon for loopback URLs; a remote/custom relay must already be serving. The relay is a connected browser: no process ownership and no stealth patches. Without `app.target`, the visible usable tab is adopted without raising it; a matcher selects by URL/title substring.
-  - **Cmux surface (`browser.cmux`)**: with no `app` and a cmux socket available (`CMUX_SOCKET_PATH`, enabled by the `browser.cmux` setting / `PI_BROWSER_CMUX` override), drives a cmux WKWebView surface over a unix-socket JSON-RPC client instead of Puppeteer. No Bun worker and no stealth patches; `open` opens a split (owning that surface), `run` executes via `runCmuxCode()`, and `close` issues `surface.close` for surfaces it owns (leaving the workspace's last surface open).
+  - **Cmux surface (`browser.cmux`)**: with no `app` and a cmux socket available (`CMUX_SOCKET_PATH`, enabled by the `browser.cmux` setting / `PI_BROWSER_CMUX` override), drives a cmux WKWebView surface over a unix-socket JSON-RPC client instead of the Playwright/CDP browser backend. No Bun worker and no stealth patches; `open` opens a split (owning that surface), `run` executes via `runCmuxCode()`, and `close` issues `surface.close` for surfaces it owns (leaving the workspace's last surface open).
 - **Target selection for attached/spawned/relay browsers**
   - With `app.target`, `pickElectronTarget()` returns the first page whose URL or title contains the case-insensitive substring.
-  - Without `app.target`, it skips titles/URLs matching `request handler|devtools|background page|background host|service worker` and otherwise falls back to the first page.
+  - Without a target matcher, it skips titles/URLs matching `request handler|devtools|background page|background host|service worker` and otherwise falls back to the first page.
 - **Worker mode**
   - **Dedicated worker**: normal path; user code runs off the main thread and can be aborted even when it blocks synchronously.
   - **Inline fallback**: activated when Bun worker spawn fails; behavior matches, but synchronous infinite loops on user code cannot be interrupted.
@@ -190,18 +192,18 @@ The tool returns one result per call; no streaming partial output is emitted fro
 
 ## Side Effects
 - Filesystem
-  - `loadPuppeteer()` writes `{}` to `<puppeteer-safe-dir>/package.json` before importing `puppeteer-core`.
-  - First headless launch may download Chromium into the Puppeteer cache directory returned by `getPuppeteerDir()`.
+  - Browser workers load Playwright 1.62.1's CDP client.
+  - First headless launch may download pinned Chromium into the OMP browser cache via `ensureChromiumExecutable()`.
   - `tab.screenshot()` creates parent directories and writes image files.
   - `tab.uploadFile()` resolves supplied paths against the session cwd.
 - Network
   - CDP attach paths poll `http://127.0.0.1:<port>/json/version` or the supplied `cdp_url` `/json/version`.
   - Headless/browser-attach sessions create CDP websocket connections.
-  - Headless first-use Chromium download uses the in-house `@oh-my-pi/pi-utils/browsers` installer.
-  - Loopback relay mode may start the machine-global `omp.browser.relay` daemon. The extension connects outbound to the relay, and Puppeteer connects to its CDP-compatible endpoint.
+  - Headless first-use Chromium download uses the in-house `@oh-my-pi/pi-utils/chromium` installer.
+  - Loopback relay mode may start the machine-global `omp.browser.relay` daemon. The extension connects outbound to the relay, and Playwright connects to its CDP-compatible endpoint.
   - User `page` / `tab` operations perform normal browser network traffic.
 - Subprocesses / native bindings
-  - Headless mode launches Chromium through Puppeteer.
+  - Headless mode launches Chromium through Playwright's CDP client.
   - `app.path` mode may spawn the target executable via `Bun.spawn()`.
   - `killExistingByPath()` / `gracefulKillTreeOnce()` use `@oh-my-pi/pi-natives` process inspection/termination.
   - Worker mode uses Bun `Worker`; fallback mode does not.
@@ -219,8 +221,8 @@ The tool returns one result per call; no streaming partial output is emitted fro
 ## Limits & Caps
 - Tool timeout clamp: default `30` s, min `1` s, max `300` s (`TOOL_TIMEOUTS.browser` in `packages/coding-agent/src/tools/tool-timeouts.ts`).
 - Supervisor grace period around init/run/close: `750` ms (`GRACE_MS` in `packages/coding-agent/src/tools/browser/tab-supervisor.ts`).
-- Puppeteer protocol timeout for launch/connect operations: `60_000` ms (`BROWSER_PROTOCOL_TIMEOUT_MS` in `packages/coding-agent/src/tools/browser/launch.ts`).
-- Connected-browser CDP readiness wait: `5_000` ms before `puppeteer.connect()` (`packages/coding-agent/src/tools/browser/registry.ts`).
+- Playwright/CDP protocol timeout for launch/connect operations: `60_000` ms (`BROWSER_PROTOCOL_TIMEOUT_MS` in `packages/coding-agent/src/tools/browser/launch.ts`).
+- Connected-browser CDP readiness wait: `5_000` ms before `chromium.connectOverCDP()` (`packages/coding-agent/src/tools/browser/registry.ts`).
 - Spawned-app CDP readiness wait after spawn: `30_000` ms (`packages/coding-agent/src/tools/browser/registry.ts`).
 - Relay extension handshake wait: `35_000` ms; loopback relay daemon readiness: `15_000` ms (`packages/coding-agent/src/tools/browser/{registry,relay/daemon}.ts`).
 - CDP polling cadence: 150 ms in `waitForCdp()` (`packages/coding-agent/src/tools/browser/attach.ts`).
@@ -241,7 +243,7 @@ The tool returns one result per call; no streaming partial output is emitted fro
   - `No page target matched "...". Available pages:\n...`
   - `Target ... is no longer available on the attached browser`
 - Spawned-app path validation requires an absolute executable path after cwd resolution, not an app bundle directory path.
-- Spawn/attach failures are wrapped into `ToolError`s such as `Timed out waiting for CDP endpoint ...`, `Failed to attach to ...`, or `Connected to ... but puppeteer.connect failed: ...`.
+- Spawn/attach failures are wrapped into `ToolError`s such as `Timed out waiting for CDP endpoint ...`, `Failed to attach to ...`, or `Connected to ... but Playwright CDP connect failed: ...`.
 - `app.cdp_url` must be the HTTP CDP discovery endpoint, not a `ws://` URL; otherwise `normalizeConnectedCdpUrl()` throws `browser app.cdp_url must be the HTTP CDP discovery endpoint ...`.
 - Relay mode rejects an unreachable endpoint or a relay whose extension never connects. Loopback CLI-host errors tell the user to run `omp browser-relay install` and check the extension badge; remote/non-auto-started errors tell the user to start `omp browser-relay` or check the endpoint.
 - `tab` helper errors are user-visible `ToolError`s, including unsupported selector prefix, stale/unknown element id, invalid drag target, missing upload files, non-`<select>` for `tab.select()`, non-file-input for `tab.uploadFile()`, and screenshot selector misses.
@@ -250,13 +252,11 @@ The tool returns one result per call; no streaming partial output is emitted fro
 ## Notes
 - Use `read` for static URLs; use `browser` when JavaScript execution, authentication, or interaction is required. A tab must be opened before `run`, and named tabs persist until closed.
 - `run` code has full Node/Bun and session-tool access; it is not sandboxed.
-- `loadPuppeteer()` and `loadPuppeteerInWorker()` temporarily redirect `cwd` to a safe Puppeteer directory before importing `puppeteer-core`, because Puppeteer probes the current working directory during module load.
-- Headless launch prefers a detected system Chrome/Chromium, then `PUPPETEER_EXECUTABLE_PATH`, and only then downloads Chromium.
-- Headless launch always passes `--no-sandbox`, `--disable-setuid-sandbox`, `--disable-blink-features=AutomationControlled`, and a `--window-size=...` matching the initial viewport. It also ignores Puppeteer default args `--disable-extensions`, `--disable-default-apps`, and `--disable-component-extensions-with-background-pages`.
-- Proxy-related env vars only affect headless launch argv (shared and local): `PUPPETEER_PROXY`, `PUPPETEER_PROXY_BYPASS_LOOPBACK`, and `PUPPETEER_PROXY_IGNORE_CERT_ERRORS`. For the shared daemon they are baked in at first launch and take effect again after the daemon's next cold start.
+- Headless launch prefers `OMP_BROWSER_EXECUTABLE_PATH`, then detected system Chrome/Chromium, and only then downloads Chromium.
+- Headless launch always passes `--no-sandbox`, `--disable-setuid-sandbox`, `--disable-blink-features=AutomationControlled`, and a `--window-size=...` matching the initial viewport. It also omits Chromium defaults that disable extensions, default apps, or component extensions with background pages.
+- Proxy-related env vars only affect headless launch argv (shared and local): `OMP_BROWSER_PROXY`, `OMP_BROWSER_PROXY_BYPASS_LOOPBACK`, and `OMP_BROWSER_PROXY_IGNORE_CERT_ERRORS`. For the shared daemon they are baked in at first launch and take effect again after the daemon's next cold start.
 - Stealth patches are applied only in headless mode. Spawned or externally connected browsers are intentionally left untouched.
 - Relay mode drives an existing user browser and receives no stealth patches. Anything that can reach the relay endpoint can drive logged-in tabs; the built-in server binds loopback, and an optional shared token gates the extension connection.
-- `applyStealthPatches()` also strips Puppeteer's `//# sourceURL=__puppeteer_evaluation_script__` suffix from CDP `Runtime.evaluate` / `Runtime.callFunctionOn` payloads.
 - `tab.extract()` reads `page.content()`, runs Readability first, then falls back to the first non-empty of `[data-pagefind-body]`/`main article`/`article`/`main`/`[role='main']`/`body`, and returns `null` if neither extraction path yields content.
 - `close(all: true, kill: false)` disconnects from spawned, connected, and relay browsers when the last tab closes but leaves spawned app processes and the user's Chrome running.
 - Headless orphan cleanup is best-effort: if a worker dies before closing its page, the supervisor searches browser targets by `targetId` and closes that page.

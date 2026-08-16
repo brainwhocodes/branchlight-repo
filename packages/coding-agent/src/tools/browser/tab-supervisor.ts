@@ -1,20 +1,19 @@
-import { getPuppeteerDir, logger, postmortem, Snowflake, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
-import type { Page, Target } from "puppeteer-core";
+import { logger, postmortem, Snowflake, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import { webpExclusionForModel } from "../../utils/image-loading";
 import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
 import { ToolAbortError, ToolError } from "../tool-errors";
-import { pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
+import { closeCdpTarget, pickCdpTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
 import { CmuxTab, runCmuxCode } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { DEFAULT_VIEWPORT } from "./launch";
 import {
 	type BrowserHandle,
 	type BrowserKindTag,
+	type CdpBrowserHandle,
 	type CmuxBrowserHandle,
 	holdBrowser,
-	type PuppeteerBrowserHandle,
 	releaseBrowser,
 } from "./registry";
 import type {
@@ -23,7 +22,6 @@ import type {
 	RunResultOk,
 	SessionSnapshot,
 	Transferable,
-	Transport,
 	WorkerInbound,
 	WorkerInitPayload,
 	WorkerOutbound,
@@ -37,7 +35,7 @@ interface WorkerHandle {
 	onMessage(handler: (msg: WorkerOutbound) => void): () => void;
 	onError(handler: (error: Error) => void): () => void;
 	terminate(): Promise<void>;
-	readonly mode: "worker" | "inline";
+	readonly mode: "worker";
 }
 
 export type DialogPolicy = "accept" | "dismiss";
@@ -78,7 +76,7 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	ownerSessionId?: string;
 }
 
-export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle> {
+export interface WorkerTabSession extends TabSessionBase<CdpBrowserHandle> {
 	backend: "worker";
 	worker: WorkerHandle;
 	activateForScreenshot: boolean;
@@ -141,18 +139,6 @@ const WORKER_INIT_TIMEOUT_MS = 15_000;
 const killedTabs = new Map<string, string>();
 const DEFAULT_TAB_CLOSE_TIMEOUT_MS = 5_000;
 class RecoverableWorkerError extends ToolError {}
-const REPORTED_INIT_FAILURE = Symbol("reported-init-failure");
-
-type ReportedInitFailure = Error & { [REPORTED_INIT_FAILURE]?: true };
-
-function markReportedInitFailure(error: Error): Error {
-	(error as ReportedInitFailure)[REPORTED_INIT_FAILURE] = true;
-	return error;
-}
-
-function isReportedInitFailure(error: unknown): boolean {
-	return error instanceof Error && (error as ReportedInitFailure)[REPORTED_INIT_FAILURE] === true;
-}
 
 async function waitForTabCleanup<T>(
 	tab: TabSession,
@@ -218,9 +204,8 @@ async function acquireTabImpl(
 			} else {
 				const reuseSteps: string[] = [];
 				if (opts.viewport && browser.kind.kind !== "cmux") {
-					const dsf = opts.viewport.deviceScaleFactor;
 					reuseSteps.push(
-						`await page.setViewport({ width: ${opts.viewport.width}, height: ${opts.viewport.height}, deviceScaleFactor: ${dsf === undefined ? "undefined" : String(dsf)} });`,
+						`await page.setViewportSize({ width: ${opts.viewport.width}, height: ${opts.viewport.height} });`,
 					);
 				}
 				if (opts.url) {
@@ -279,33 +264,9 @@ async function acquireTabImpl(
 			Math.max(WORKER_INIT_TIMEOUT_MS, opts.timeoutMs + GRACE_MS),
 		);
 	} catch (error) {
-		// `BuildMessage`-class failures arrive asynchronously via the worker's `error` event,
-		// after `spawnTabWorker`'s synchronous try/catch has already returned. Fall back to
-		// the inline worker here so module-resolution failures don't poison every tab open.
 		await worker.terminate().catch(() => undefined);
-		if (worker.mode === "inline" || isReportedInitFailure(error)) {
-			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
-			throw error;
-		}
-		logger.warn("Tab worker init failed; retrying with inline tab worker (no sync-loop guard)", {
-			error: error instanceof Error ? error.message : String(error),
-		});
-		worker = await spawnInlineWorker();
-		try {
-			info = await initializeTabWorker(
-				worker,
-				initPayload,
-				Math.max(WORKER_INIT_TIMEOUT_MS, opts.timeoutMs + GRACE_MS),
-			);
-		} catch (inlineError) {
-			await worker.terminate().catch(() => undefined);
-			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
-			const finalError = new ToolError(
-				`Failed to start browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
-			);
-			(finalError as { cause?: unknown }).cause = error;
-			throw finalError;
-		}
+		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
+		throw error;
 	}
 
 	// If the caller aborted while we were spawning/initializing the worker, tear
@@ -519,14 +480,7 @@ async function runInTabWithSnapshot(
 				error instanceof ToolError && error.message.startsWith("Browser code execution timed out after ");
 			if (runTimedOut || error instanceof RecoverableWorkerError) {
 				try {
-					if (tab.worker.mode === "inline") {
-						const reason = runTimedOut
-							? "Browser code execution timed out; tab killed"
-							: "Browser request interception cleanup failed; tab killed";
-						await forceKillTab(name, reason);
-					} else {
-						await recycleTimedOutWorkerTab(tab, opts.timeoutMs + GRACE_MS);
-					}
+					await recycleTimedOutWorkerTab(tab, opts.timeoutMs + GRACE_MS);
 				} catch (recycleError) {
 					logger.warn("Failed to recycle browser tab worker; killing tab", {
 						error: recycleError instanceof Error ? recycleError.message : String(recycleError),
@@ -691,15 +645,11 @@ function isLastSurfaceCloseError(err: unknown): boolean {
 	return /last/i.test(message);
 }
 
-async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
-	const safeDir = getPuppeteerDir();
-	const browserWSEndpoint = browser.browser.wsEndpoint();
-	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
+async function buildInitPayload(browser: CdpBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
 	if (browser.kind.kind === "headless") {
 		return {
 			mode: "headless",
-			browserWSEndpoint,
-			safeDir,
+			cdpEndpoint: browser.cdpEndpoint,
 			viewport: opts.viewport,
 			dialogs: opts.dialogs,
 			url: opts.url,
@@ -707,21 +657,20 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			timeoutMs: opts.timeoutMs,
 		};
 	}
-	// Connected and relay browsers are user-driven. When no target is requested,
-	// adopt the visible tab and avoid raising it before screenshots. An explicit
-	// target may be backgrounded, so retain activation for target-correct pixels.
+	// Resolve one concrete transport identity before the worker starts. The
+	// worker adopts that target id exactly and never substitutes another page.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	const page = await pickElectronTarget(browser.browser, {
+	const target = await pickCdpTarget(browser.cdpEndpoint, {
 		matcher: opts.target,
 		preferVisible: !activateForScreenshot,
+		timeoutMs: Math.min(opts.timeoutMs, 5_000),
+		signal: opts.signal,
 	});
-	const targetId = await targetIdForPage(page);
 	return {
 		mode: "attach",
-		browserWSEndpoint,
-		safeDir,
-		targetId,
+		cdpEndpoint: browser.cdpEndpoint,
+		targetId: target.id,
 		dialogs: opts.dialogs,
 		url: opts.url,
 		waitUntil: opts.waitUntil,
@@ -817,21 +766,16 @@ function toErrorPayload(error: unknown): RunErrorPayload {
 async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number): Promise<void> {
 	const oldWorker = tab.worker;
 	await oldWorker.terminate().catch(() => undefined);
-	const browserWSEndpoint = tab.browser.browser.wsEndpoint();
-	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
 	const payload: WorkerInitPayload = {
 		mode: "attach",
-		browserWSEndpoint,
-		safeDir: getPuppeteerDir(),
+		cdpEndpoint: tab.browser.cdpEndpoint,
 		targetId: tab.targetId,
 		dialogs: tab.dialogPolicy,
-		// Unblock a wedged page (open JS dialog, hung navigation) before adopting it —
-		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: true,
 		timeoutMs,
 		activateForScreenshot: tab.activateForScreenshot,
 	};
-	let worker = await spawnTabWorker();
+	const worker = await spawnTabWorker();
 	try {
 		const info = await initializeTabWorker(worker, payload, timeoutMs);
 		tab.worker = worker;
@@ -840,21 +784,7 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		worker.onMessage(msg => handleTabMessage(tab, msg));
 	} catch (error) {
 		await worker.terminate().catch(() => undefined);
-		worker = await spawnInlineWorker();
-		try {
-			const info = await initializeTabWorker(worker, payload, timeoutMs);
-			tab.worker = worker;
-			tab.info = info;
-			tab.state = "alive";
-			worker.onMessage(msg => handleTabMessage(tab, msg));
-		} catch (inlineError) {
-			await worker.terminate().catch(() => undefined);
-			const finalError = new ToolError(
-				`Failed to recycle timed-out browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
-			);
-			Object.defineProperty(finalError, "cause", { value: error, configurable: true });
-			throw finalError;
-		}
+		throw error;
 	}
 }
 
@@ -878,12 +808,7 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 }
 
 async function closeOrphanTarget(tab: WorkerTabSession): Promise<void> {
-	for (const target of tab.browser.browser.targets()) {
-		if ((await targetIdForTarget(target).catch(() => "")) !== tab.targetId) continue;
-		const page = await target.page().catch(() => null);
-		await page?.close().catch(() => undefined);
-		return;
-	}
+	await closeCdpTarget(tab.browser.cdpEndpoint, tab.targetId).catch(() => undefined);
 }
 
 async function waitForClosed(tab: WorkerTabSession): Promise<void> {
@@ -901,23 +826,6 @@ async function waitForClosed(tab: WorkerTabSession): Promise<void> {
 function expandBrowserScreenshotDir(session: ToolSession): string | undefined {
 	const value = session.settings.get("browser.screenshotDir") as string | undefined;
 	return value ? expandPath(value) : undefined;
-}
-
-async function targetIdForPage(page: Page): Promise<string> {
-	return await targetIdForTarget(page.target());
-}
-
-async function targetIdForTarget(target: Target): Promise<string> {
-	const raw = target as unknown as { _targetId?: unknown };
-	if (typeof raw._targetId === "string") return raw._targetId;
-	const session = await target.createCDPSession();
-	try {
-		const info = (await session.send("Target.getTargetInfo")) as { targetInfo?: { targetId?: string } };
-		if (info.targetInfo?.targetId) return info.targetInfo.targetId;
-		throw new ToolError("Target id unavailable from CDP target info");
-	} finally {
-		await session.detach().catch(() => undefined);
-	}
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {
@@ -966,11 +874,10 @@ async function spawnTabWorker(): Promise<WorkerHandle> {
 			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_tab"] })
 			: new Worker(new URL("./tab-worker-entry.ts", import.meta.url).href, { type: "module" });
 		return wrapBunWorker(worker);
-	} catch (err) {
-		logger.warn("Bun Worker spawn failed; using inline tab worker (no sync-loop guard)", {
-			error: err instanceof Error ? err.message : String(err),
-		});
-		return spawnInlineWorker();
+	} catch (error) {
+		throw new ToolError(
+			`Failed to spawn browser tab worker: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 }
 
@@ -1002,43 +909,6 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 	};
 }
 
-/**
- * Inline fallback for environments where Bun cannot compile or spawn the worker
- * entry. This preserves normal browser behavior but cannot interrupt synchronous
- * infinite loops because user code runs on the main thread.
- */
-async function spawnInlineWorker(): Promise<WorkerHandle> {
-	const hostListeners = new Set<(message: WorkerOutbound) => void>();
-	const workerListeners = new Set<(message: WorkerInbound) => void>();
-	const workerTransport: Transport = {
-		send: msg =>
-			queueMicrotask(() => {
-				for (const listener of hostListeners) listener(msg as WorkerOutbound);
-			}),
-		onMessage: handler => {
-			const typed = handler as (message: WorkerInbound) => void;
-			workerListeners.add(typed);
-			return () => workerListeners.delete(typed);
-		},
-		close: () => {},
-	};
-	const { WorkerCore } = await import("./tab-worker");
-	new WorkerCore(workerTransport, false);
-	return {
-		mode: "inline",
-		send: msg =>
-			queueMicrotask(() => {
-				for (const listener of workerListeners) listener(msg);
-			}),
-		onMessage: handler => {
-			hostListeners.add(handler);
-			return () => hostListeners.delete(handler);
-		},
-		onError: () => () => {},
-		async terminate() {},
-	};
-}
-
 async function initializeTabWorker(
 	worker: WorkerHandle,
 	payload: WorkerInitPayload,
@@ -1047,7 +917,7 @@ async function initializeTabWorker(
 	const { promise, resolve, reject } = Promise.withResolvers<ReadyInfo>();
 	const unlisten = worker.onMessage(msg => {
 		if (msg.type === "ready") resolve(msg.info);
-		else if (msg.type === "init-failed") reject(markReportedInitFailure(errorFromPayload(msg.error)));
+		else if (msg.type === "init-failed") reject(errorFromPayload(msg.error));
 		else if (msg.type === "log") logWorkerMessage(msg);
 	});
 	const unlistenError = worker.onError(error => {

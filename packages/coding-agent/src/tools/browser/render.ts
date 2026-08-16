@@ -34,29 +34,33 @@ interface BrowserRenderContext {
 	previewLines?: number;
 }
 
-function describeBrowser(args: BrowserRenderArgs, details: BrowserToolDetails | undefined): string | undefined {
+function describeBrowser(
+	args: BrowserRenderArgs,
+	details: BrowserToolDetails | undefined,
+	showRequestedBrowser: boolean,
+): string | undefined {
 	const cdpUrl = typeof args.app?.cdp_url === "string" ? args.app.cdp_url : "";
-	if (cdpUrl) return `connected ${cdpUrl}`;
 	const appPath = typeof args.app?.path === "string" ? args.app.path : "";
+	switch (details?.browser) {
+		case "headless":
+			return "headless";
+		case "spawned":
+			return appPath ? `spawned ${shortenPath(appPath)}` : "spawned";
+		case "connected":
+			return cdpUrl ? `connected ${cdpUrl}` : "connected";
+		case "relay":
+			return "relay";
+		case "cmux":
+			return "cmux";
+	}
+	if (!showRequestedBrowser) return undefined;
+	if (cdpUrl) return `connected ${cdpUrl}`;
 	if (appPath) return `spawned ${shortenPath(appPath)}`;
 	if (args.app?.relay) return "relay";
 	if (args.app?.cmux !== false && (args.app?.cmux === true || args.app?.surface)) {
 		return args.app.surface ? `cmux ${args.app.surface}` : "cmux";
 	}
-	switch (details?.browser) {
-		case "headless":
-			return "headless";
-		case "spawned":
-			return "spawned";
-		case "connected":
-			return "connected";
-		case "relay":
-			return "relay";
-		case "cmux":
-			return "cmux";
-		default:
-			return undefined;
-	}
+	return undefined;
 }
 
 function tabLabel(args: BrowserRenderArgs, details: BrowserToolDetails | undefined): string {
@@ -89,6 +93,7 @@ function appendLine(component: Component, line: string | undefined): Component {
 function renderRunCell(
 	args: BrowserRenderArgs,
 	details: BrowserToolDetails | undefined,
+	showRequestedBrowser: boolean,
 	options: RenderResultOptions & { renderContext?: BrowserRenderContext },
 	output: string,
 	isError: boolean,
@@ -100,7 +105,7 @@ function renderRunCell(
 	const titleParts: string[] = [tabLabel(args, details)];
 	const url = typeof details?.url === "string" ? details.url : typeof args.url === "string" ? args.url : "";
 	if (url) titleParts.push(shortenPath(url));
-	const browserDesc = describeBrowser(args, details);
+	const browserDesc = describeBrowser(args, details, showRequestedBrowser);
 	if (browserDesc) titleParts.push(browserDesc);
 	const title = titleParts.join(" · ");
 
@@ -149,6 +154,7 @@ function renderRunCell(
 function renderOpenOrCloseLine(
 	args: BrowserRenderArgs,
 	details: BrowserToolDetails | undefined,
+	showRequestedBrowser: boolean,
 	isPartial: boolean,
 	isError: boolean,
 	output: string,
@@ -169,7 +175,7 @@ function renderOpenOrCloseLine(
 	}
 
 	const meta: string[] = [];
-	const browserDesc = describeBrowser(args, details);
+	const browserDesc = describeBrowser(args, details, showRequestedBrowser);
 	if (browserDesc) meta.push(browserDesc);
 	const url = typeof details?.url === "string" ? details.url : typeof args.url === "string" ? args.url : "";
 	if (url) meta.push(shortenPath(url));
@@ -198,9 +204,9 @@ export const browserToolRenderer = {
 	renderCall(args: BrowserRenderArgs, options: RenderResultOptions, theme: Theme): Component {
 		const action = args.action;
 		if (action === "run") {
-			return renderRunCell(args, undefined, options, "", false, theme);
+			return renderRunCell(args, undefined, true, options, "", false, theme);
 		}
-		return renderOpenOrCloseLine(args, undefined, options.isPartial, false, "", theme);
+		return renderOpenOrCloseLine(args, undefined, true, options.isPartial, false, "", theme);
 	},
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: BrowserToolDetails; isError?: boolean },
@@ -215,14 +221,14 @@ export const browserToolRenderer = {
 		const output = stripOutputNotice(extractTextOutput(result.content), details?.meta);
 
 		if (action === "run") {
-			let component = renderRunCell(argsObj, details, options, output, isError, theme);
+			let component = renderRunCell(argsObj, details, false, options, output, isError, theme);
 			const truncationWarning = details?.meta?.truncation
 				? (formatStyledTruncationWarning(details.meta, theme) ?? undefined)
 				: undefined;
 			component = appendLine(component, truncationWarning);
 			return component;
 		}
-		return renderOpenOrCloseLine(argsObj, details, options.isPartial, isError, output, theme);
+		return renderOpenOrCloseLine(argsObj, details, false, options.isPartial, isError, output, theme);
 	},
 	mergeCallAndResult: true,
 	inline: true,

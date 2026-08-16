@@ -279,4 +279,54 @@ describe("RelayBridge tab grouping", () => {
 		expect(groups).toHaveLength(1);
 		expect(groups[0]!.tabIds).toEqual([1]);
 	});
+	it("routes commands on an attached browser target through its synthetic session", async () => {
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+
+		const attachId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: attachId, method: "Target.attachToBrowserTarget" }));
+		await flush();
+		const browserSessionId = cdp.sessionFor(attachId);
+		if (!browserSessionId) throw new Error("attachToBrowserTarget did not produce a browser session");
+
+		const discoverId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: discoverId, sessionId: browserSessionId, method: "Target.setDiscoverTargets" }),
+		);
+		await flush();
+		const discovery = cdp.messages.find(message => message.id === discoverId && "result" in message);
+		expect(discovery).toMatchObject({ id: discoverId, sessionId: browserSessionId, result: {} });
+		const created = cdp.messages.find(message => message.method === "Target.targetCreated");
+		expect(created).toMatchObject({ sessionId: browserSessionId });
+
+		const autoAttachId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: autoAttachId,
+				sessionId: browserSessionId,
+				method: "Target.setAutoAttach",
+				params: { autoAttach: true, flatten: true },
+			}),
+		);
+		ack(bridge, ext, "attach");
+		await flush();
+		const autoAttach = cdp.messages.find(message => message.id === autoAttachId && "result" in message);
+		expect(autoAttach).toMatchObject({ id: autoAttachId, sessionId: browserSessionId, result: {} });
+		const attached = cdp.messages.find(message => message.method === "Target.attachedToTarget");
+		expect(attached).toMatchObject({ sessionId: browserSessionId });
+
+		const runtimeId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: runtimeId, sessionId: browserSessionId, method: "Runtime.enable" }),
+		);
+		await flush();
+		const runtimeError = cdp.messages.find(message => message.id === runtimeId);
+		expect(runtimeError).toMatchObject({ id: runtimeId, sessionId: browserSessionId, error: expect.any(Object) });
+	});
 });

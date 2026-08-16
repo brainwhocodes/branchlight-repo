@@ -1,8 +1,8 @@
 /**
  * CDP façade over `chrome.debugger`.
  *
- * Puppeteer clients (the omp browser tool: one supervisor connection plus one
- * per tab worker) connect to this bridge as if it were Chrome's browser
+ * Playwright 1.62.1 clients (the omp browser tool: one supervisor connection
+ * plus one per tab worker) connect to this bridge as if it were Chrome's browser
  * debugging endpoint. Chrome only allows a single debugger attachment per tab,
  * so the bridge owns ONE `chrome.debugger` attachment per tab (via the
  * extension) and multiplexes every downstream connection over it with minted
@@ -10,9 +10,9 @@
  *
  * Emulated surface (everything else is forwarded to `chrome.debugger`):
  * - the browser target (`/json/version` handshake, `Browser.getVersion`)
- * - the `Target.*` domain, including puppeteer's tab → page auto-attach
- *   hierarchy (see puppeteer-core `cdp/ExtensionTransport.ts`, the reference
- *   implementation for this emulation)
+ * - the `Target.*` domain, including Playwright's tab → page auto-attach
+ *   hierarchy (see Playwright's CDP transport, the reference implementation for
+ *   this emulation)
  *
  * Session id namespaces seen by a downstream connection:
  * - minted tab pseudo-sessions (`ST<tab>.<conn>.<n>`) — Target emulation only
@@ -36,10 +36,16 @@ interface CdpCommand {
 	sessionId?: string;
 }
 
-interface SessionRef {
+interface BrowserSessionRef {
+	kind: "browser";
+}
+
+interface TabSessionRef {
 	kind: "tab" | "page";
 	tabId: number;
 }
+
+type SessionRef = BrowserSessionRef | TabSessionRef;
 
 interface TargetInfo {
 	targetId: string;
@@ -48,11 +54,17 @@ interface TargetInfo {
 	url: string;
 	attached: boolean;
 	canAccessOpener: boolean;
+	browserContextId?: string;
 }
 
 class CdpConnection {
 	discover = false;
 	autoAttach = false;
+	flatten = false;
+	/** Browser-target session that owns discovery events, if any. */
+	discoverSessionId: string | undefined;
+	/** Browser-target session that owns auto-attach events, if any. */
+	autoAttachSessionId: string | undefined;
 	/** Minted pseudo-sessions owned by this connection. */
 	readonly sessions = new Map<string, SessionRef>();
 	/** Tabs this connection claimed as drive targets (`OMP.claimTarget` / `Target.createTarget`). */
@@ -66,6 +78,7 @@ class CdpConnection {
 	sessionsForTab(tabId: number, kind?: "tab" | "page"): string[] {
 		const out: string[] = [];
 		for (const [sessionId, ref] of this.sessions) {
+			if (!("tabId" in ref)) continue;
 			if (ref.tabId === tabId && (!kind || ref.kind === kind)) out.push(sessionId);
 		}
 		return out;
@@ -96,7 +109,10 @@ class TabState {
 	groupOptOut = false;
 	/** Real Chrome session ids (OOPIF/worker children) living under this tab's root session. */
 	readonly realSessions = new Set<string>();
-
+	/** Hex main frame id reported by Page.getFrameTree; null until first retrieved. */
+	mainFrameId: string | null = null;
+	/** Cached execution context payloads reported by Runtime.executionContextCreated. */
+	readonly executionContexts = new Map<number, Record<string, unknown>>();
 	constructor(
 		readonly tabId: number,
 		snap: TabSnapshot,
@@ -142,8 +158,8 @@ function parseTargetId(targetId: string): { kind: "tab" | "page"; tabId: number 
 }
 
 /**
- * Multiplexing CDP bridge between downstream puppeteer connections and the
- * relay extension. One instance per relay server; all state lives here so an
+ * Multiplexing CDP bridge between downstream Playwright 1.62.1 connections and
+ * the relay extension. One instance per relay server; all state lives here so an
  * extension service-worker restart only has to re-handshake.
  */
 export class RelayBridge {
@@ -311,7 +327,7 @@ export class RelayBridge {
 		this.#log("extension connected", { tabs: this.#tabs.size, version: msg.browserVersion });
 	}
 
-	// ---- downstream (puppeteer) lifecycle -------------------------------------
+	// ---- downstream (Playwright/CDP) lifecycle -------------------------------
 
 	/** Register a downstream CDP websocket; returns the connection id. */
 	cdpConnected(socket: RelaySocket): number {
@@ -326,7 +342,9 @@ export class RelayBridge {
 		if (!conn) return;
 		this.#conns.delete(connId);
 		const touched = new Set<number>();
-		for (const ref of conn.sessions.values()) touched.add(ref.tabId);
+		for (const ref of conn.sessions.values()) {
+			if ("tabId" in ref) touched.add(ref.tabId);
+		}
 		conn.sessions.clear();
 		// Tabs this client claimed leave the omp group unless another claimant
 		// remains — session holders don't count: the long-lived registry
@@ -372,6 +390,10 @@ export class RelayBridge {
 			return;
 		}
 		const ref = conn.sessions.get(sessionId);
+		if (ref?.kind === "browser") {
+			await this.#handleBrowserSessionCommand(conn, msg);
+			return;
+		}
 		if (ref?.kind === "tab") {
 			this.#handleTabSessionCommand(conn, msg, ref);
 			return;
@@ -394,9 +416,24 @@ export class RelayBridge {
 		tabId: number,
 		realSessionId: string | undefined,
 	): Promise<void> {
-		// Guard rail: a page session must never take the whole browser down.
-		if (msg.method === "Browser.close") {
+		const tab = this.#tabs.get(tabId);
+		// Guard rails: browser-domain commands sent to page sessions.
+		if (
+			msg.method === "Browser.close" ||
+			msg.method === "Browser.setDownloadBehavior" ||
+			msg.method === "Browser.setWindowBounds"
+		) {
 			this.#reply(conn, msg, {});
+			return;
+		}
+		if (msg.method === "Browser.getWindowForTarget") {
+			this.#reply(conn, msg, { windowId: tab?.windowId ?? 1 });
+			return;
+		}
+		if (msg.method === "Browser.getWindowBounds") {
+			this.#reply(conn, msg, {
+				bounds: { left: 0, top: 0, width: 1280, height: 800, windowState: "normal" },
+			});
 			return;
 		}
 		// Relay-private claim: the omp tab worker marks the page it was spawned
@@ -407,13 +444,78 @@ export class RelayBridge {
 			return;
 		}
 		try {
-			const result = await this.#rpc({
+			if (msg.method === "Page.createIsolatedWorld" && !tab?.mainFrameId) {
+				try {
+					const treeResult = (await this.#rpc({ op: "send", tabId, method: "Page.getFrameTree" })) as
+						| Record<string, unknown>
+						| undefined;
+					if (treeResult && typeof treeResult === "object" && "frameTree" in treeResult) {
+						const tree = treeResult.frameTree;
+						if (tree && typeof tree === "object" && "frame" in tree) {
+							const frame = tree.frame;
+							if (frame && typeof frame === "object" && "id" in frame && typeof frame.id === "string" && tab) {
+								tab.mainFrameId = frame.id;
+							}
+						}
+					}
+				} catch {}
+			}
+			let params = msg.params;
+			if (
+				params &&
+				typeof params.frameId === "string" &&
+				tab?.mainFrameId &&
+				params.frameId === pageTargetId(tabId)
+			) {
+				params = { ...params, frameId: tab.mainFrameId };
+			}
+			const result = (await this.#rpc({
 				op: "send",
 				tabId,
 				sessionId: realSessionId,
 				method: msg.method,
-				params: msg.params,
-			});
+				params,
+			})) as Record<string, unknown> | undefined;
+			if (msg.method === "Runtime.enable" && msg.sessionId) {
+				this.#replayExecutionContexts(conn, tabId, msg.sessionId);
+			}
+			if (msg.method === "Page.getFrameTree" && result && typeof result === "object" && "frameTree" in result) {
+				const tree = result.frameTree;
+				if (tree && typeof tree === "object" && "frame" in tree) {
+					const frame = tree.frame;
+					if (frame && typeof frame === "object" && "id" in frame && typeof frame.id === "string" && tab) {
+						tab.mainFrameId = frame.id;
+						frame.id = pageTargetId(tabId);
+					}
+				}
+			}
+			if (
+				msg.method === "Page.createIsolatedWorld" &&
+				result &&
+				typeof result === "object" &&
+				"executionContextId" in result &&
+				typeof result.executionContextId === "number" &&
+				tab
+			) {
+				const worldName = typeof msg.params?.worldName === "string" ? msg.params.worldName : "";
+				this.#emit(
+					conn,
+					"Runtime.executionContextCreated",
+					{
+						context: {
+							id: result.executionContextId,
+							origin: tab.url,
+							name: worldName,
+							auxData: {
+								isDefault: false,
+								type: "isolated",
+								frameId: pageTargetId(tabId),
+							},
+						},
+					},
+					msg.sessionId,
+				);
+			}
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 		} catch (err) {
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
@@ -444,8 +546,8 @@ export class RelayBridge {
 		return false;
 	}
 
-	/** Tab pseudo-sessions only exist to satisfy puppeteer's Target hierarchy. */
-	#handleTabSessionCommand(conn: CdpConnection, msg: CdpCommand, ref: SessionRef): void {
+	/** Tab pseudo-sessions only exist to satisfy Playwright's Target hierarchy. */
+	#handleTabSessionCommand(conn: CdpConnection, msg: CdpCommand, ref: TabSessionRef): void {
 		switch (msg.method) {
 			case "Target.setAutoAttach": {
 				const tab = this.#tabs.get(ref.tabId);
@@ -453,7 +555,7 @@ export class RelayBridge {
 					this.#replyError(conn, msg, `Tab ${ref.tabId} is gone`);
 					return;
 				}
-				// Emit before replying: puppeteer's TargetManager counts page
+				// Emit before replying: Playwright's TargetManager counts page
 				// children attached before the setAutoAttach response resolves.
 				const pageSession = this.#mintSession(conn, "page", tab.tabId);
 				this.#emit(
@@ -472,6 +574,15 @@ export class RelayBridge {
 			case "Runtime.runIfWaitingForDebugger":
 				this.#reply(conn, msg, {});
 				return;
+			case "Target.getTargetInfo": {
+				const tab = this.#tabs.get(ref.tabId);
+				if (!tab) {
+					this.#replyError(conn, msg, `Tab ${ref.tabId} is gone`);
+					return;
+				}
+				this.#reply(conn, msg, { targetInfo: this.#pageInfo(tab, tab.attached) });
+				return;
+			}
 			case "Target.detachFromTarget": {
 				const child = typeof msg.params?.sessionId === "string" ? msg.params.sessionId : undefined;
 				if (child) this.#releaseSession(conn, child, msg.sessionId);
@@ -495,32 +606,91 @@ export class RelayBridge {
 				});
 				return;
 			}
+			case "Browser.setDownloadBehavior":
+				this.#reply(conn, msg, {});
+				return;
+			case "Browser.close":
+				// Never close the user's browser; acknowledge and ignore.
+				this.#log("refusing Browser.close from downstream client", { conn: conn.id });
+				this.#reply(conn, msg, {});
+				return;
+			case "Target.createBrowserContext":
+				this.#replyError(conn, msg, "Browser contexts are not supported by the omp browser relay");
+				return;
+			default:
+				if (msg.method.startsWith("Target.")) {
+					await this.#handleBrowserTargetCommand(conn, msg);
+					return;
+				}
+				this.#replyError(conn, msg, `'${msg.method}' wasn't found`, CDP_ERROR_METHOD_NOT_FOUND);
+		}
+	}
+
+	/**
+	 * Handle Target-domain commands on the browser target. This is separate
+	 * from the sessionless browser command path because an attached browser
+	 * target has a real downstream session id that must scope replies/events.
+	 */
+	async #handleBrowserSessionCommand(conn: CdpConnection, msg: CdpCommand): Promise<void> {
+		if (!msg.method.startsWith("Target.")) {
+			this.#replyError(
+				conn,
+				msg,
+				`'${msg.method}' wasn't found on the relay browser target`,
+				CDP_ERROR_METHOD_NOT_FOUND,
+			);
+			return;
+		}
+		await this.#handleBrowserTargetCommand(conn, msg);
+	}
+
+	async #handleBrowserTargetCommand(conn: CdpConnection, msg: CdpCommand): Promise<void> {
+		switch (msg.method) {
 			case "Target.getBrowserContexts":
 				this.#reply(conn, msg, { browserContextIds: [] });
 				return;
+			case "Target.attachToBrowserTarget": {
+				const sessionId = `SB${conn.id}.${++this.#sessionSeq}`;
+				conn.sessions.set(sessionId, { kind: "browser" });
+				this.#reply(conn, msg, { sessionId });
+				return;
+			}
 			case "Target.setDiscoverTargets": {
 				conn.discover = true;
+				conn.discoverSessionId = msg.sessionId;
 				for (const tab of this.#tabs.values()) {
 					if (!this.#eligible(tab)) continue;
 					tab.announced = true;
-					this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
-					this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
+					this.#emit(
+						conn,
+						"Target.targetCreated",
+						{ targetInfo: this.#tabInfo(tab, tab.attached) },
+						msg.sessionId,
+					);
+					this.#emit(
+						conn,
+						"Target.targetCreated",
+						{ targetInfo: this.#pageInfo(tab, tab.attached) },
+						msg.sessionId,
+					);
 				}
 				this.#reply(conn, msg, {});
 				return;
 			}
 			case "Target.setAutoAttach": {
 				conn.autoAttach = true;
+				conn.autoAttachSessionId = msg.sessionId;
+				conn.flatten = Boolean(msg.params?.flatten);
 				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab));
 				await Promise.all(tabs.map(tab => this.#ensureAttached(tab)));
 				for (const tab of tabs) {
 					if (!tab.attached) {
 						// Attach failed (DevTools open, another debugger, …): retract
-						// the target so puppeteer's init never waits on it.
+						// the target so Playwright's init never waits on it.
 						this.#retractTab(tab);
 						continue;
 					}
-					this.#emitTabAttached(conn, tab);
+					this.#emitTabAttached(conn, tab, msg.sessionId);
 				}
 				this.#reply(conn, msg, {});
 				return;
@@ -538,13 +708,18 @@ export class RelayBridge {
 				}
 				const sessionId = this.#mintSession(conn, parsed.kind, tab.tabId);
 				const info = parsed.kind === "tab" ? this.#tabInfo(tab, true) : this.#pageInfo(tab, true);
-				this.#emit(conn, "Target.attachedToTarget", { sessionId, targetInfo: info, waitingForDebugger: false });
+				this.#emit(
+					conn,
+					"Target.attachedToTarget",
+					{ sessionId, targetInfo: info, waitingForDebugger: false },
+					msg.sessionId,
+				);
 				this.#reply(conn, msg, { sessionId });
 				return;
 			}
 			case "Target.detachFromTarget": {
 				const sessionId = typeof msg.params?.sessionId === "string" ? msg.params.sessionId : undefined;
-				if (sessionId) this.#releaseSession(conn, sessionId, undefined);
+				if (sessionId) this.#releaseSession(conn, sessionId, msg.sessionId);
 				this.#reply(conn, msg, {});
 				return;
 			}
@@ -555,6 +730,11 @@ export class RelayBridge {
 				this.#onTabUpsert(result.tab);
 				// Creating a tab is an explicit act of driving it.
 				this.#claimTab(conn, result.tab.tabId);
+				const tab = this.#tabs.get(result.tab.tabId);
+				if (tab && conn.autoAttach) {
+					await this.#ensureAttached(tab);
+					this.#emitTabAttached(conn, tab, msg.sessionId);
+				}
 				this.#reply(conn, msg, { targetId: pageTargetId(result.tab.tabId) });
 				return;
 			}
@@ -596,17 +776,6 @@ export class RelayBridge {
 				});
 				return;
 			}
-			case "Browser.close":
-				// Never close the user's browser; acknowledge and ignore.
-				this.#log("refusing Browser.close from downstream client", { conn: conn.id });
-				this.#reply(conn, msg, {});
-				return;
-			case "Browser.setDownloadBehavior":
-				this.#reply(conn, msg, {});
-				return;
-			case "Target.createBrowserContext":
-				this.#replyError(conn, msg, "Browser contexts are not supported by the omp browser relay");
-				return;
 			default:
 				this.#replyError(conn, msg, `'${msg.method}' wasn't found`, CDP_ERROR_METHOD_NOT_FOUND);
 		}
@@ -622,6 +791,35 @@ export class RelayBridge {
 	): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
+		let eventParams = params;
+		if (params && tab.mainFrameId) {
+			const frameId = params.frameId;
+			const frame = params.frame;
+			const context = params.context;
+			let normalized = params;
+			if (frameId === tab.mainFrameId) {
+				normalized = { ...normalized, frameId: pageTargetId(tabId) };
+			}
+			if (frame && typeof frame === "object" && "id" in frame && frame.id === tab.mainFrameId) {
+				normalized = {
+					...normalized,
+					frame: { ...frame, id: pageTargetId(tabId) },
+				};
+			}
+			if (context && typeof context === "object") {
+				const auxData = "auxData" in context ? context.auxData : undefined;
+				if (auxData && typeof auxData === "object" && "frameId" in auxData && auxData.frameId === tab.mainFrameId) {
+					normalized = {
+						...normalized,
+						context: {
+							...context,
+							auxData: { ...auxData, frameId: pageTargetId(tabId) },
+						},
+					};
+				}
+			}
+			eventParams = normalized;
+		}
 		// Track real child sessions so downstream commands can route back.
 		if (method === "Target.attachedToTarget") {
 			const child = params?.sessionId;
@@ -635,11 +833,23 @@ export class RelayBridge {
 				tab.realSessions.delete(child);
 				this.#realSessionTabs.delete(child);
 			}
+		} else if (method === "Runtime.executionContextCreated") {
+			const context = eventParams?.context as { id?: number } | undefined;
+			if (context && typeof context.id === "number") {
+				tab.executionContexts.set(context.id, eventParams as Record<string, unknown>);
+			}
+		} else if (method === "Runtime.executionContextDestroyed") {
+			const id = params?.executionContextId;
+			if (typeof id === "number") {
+				tab.executionContexts.delete(id);
+			}
+		} else if (method === "Runtime.executionContextsCleared") {
+			tab.executionContexts.clear();
 		}
 		if (sourceSessionId) {
 			// Event from a real child session: pass through verbatim to every
 			// connection that observes this tab.
-			const payload = JSON.stringify({ sessionId: sourceSessionId, method, params });
+			const payload = JSON.stringify({ sessionId: sourceSessionId, method, params: params });
 			for (const conn of this.#conns.values()) {
 				if (conn.sessionsForTab(tabId, "page").length > 0) conn.socket.send(payload);
 			}
@@ -648,11 +858,10 @@ export class RelayBridge {
 		// Root-session event: fan out once per minted page session.
 		for (const conn of this.#conns.values()) {
 			for (const pageSession of conn.sessionsForTab(tabId, "page")) {
-				conn.socket.send(JSON.stringify({ sessionId: pageSession, method, params }));
+				conn.socket.send(JSON.stringify({ sessionId: pageSession, method, params: eventParams }));
 			}
 		}
 	}
-
 	#onTabDetached(tabId: number, reason: string): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
@@ -696,13 +905,23 @@ export class RelayBridge {
 			tab.announced = true;
 			for (const conn of this.#conns.values()) {
 				if (!conn.discover) continue;
-				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
-				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
+				this.#emit(
+					conn,
+					"Target.targetCreated",
+					{ targetInfo: this.#tabInfo(tab, tab.attached) },
+					conn.discoverSessionId,
+				);
+				this.#emit(
+					conn,
+					"Target.targetCreated",
+					{ targetInfo: this.#pageInfo(tab, tab.attached) },
+					conn.discoverSessionId,
+				);
 			}
 			for (const conn of this.#conns.values()) {
 				if (!conn.autoAttach) continue;
 				void this.#ensureAttached(tab).then(ok => {
-					if (ok) this.#emitTabAttached(conn, tab);
+					if (ok) this.#emitTabAttached(conn, tab, conn.autoAttachSessionId);
 				});
 			}
 			return;
@@ -714,8 +933,18 @@ export class RelayBridge {
 		if (eligible && tab.announced) {
 			for (const conn of this.#conns.values()) {
 				if (!conn.discover) continue;
-				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#tabInfo(tab, tab.attached) });
-				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#pageInfo(tab, tab.attached) });
+				this.#emit(
+					conn,
+					"Target.targetInfoChanged",
+					{ targetInfo: this.#tabInfo(tab, tab.attached) },
+					conn.discoverSessionId,
+				);
+				this.#emit(
+					conn,
+					"Target.targetInfoChanged",
+					{ targetInfo: this.#pageInfo(tab, tab.attached) },
+					conn.discoverSessionId,
+				);
 			}
 		}
 	}
@@ -806,22 +1035,29 @@ export class RelayBridge {
 		tab.realSessions.clear();
 		for (const conn of this.#conns.values()) {
 			const tabSessions = conn.sessionsForTab(tab.tabId, "tab");
+			const browserSessionId = conn.autoAttachSessionId;
+			const pageParentSessionId = tabSessions[0] ?? browserSessionId;
 			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
 				conn.sessions.delete(pageSession);
 				this.#emit(
 					conn,
 					"Target.detachedFromTarget",
 					{ sessionId: pageSession, targetId: pageTargetId(tab.tabId) },
-					tabSessions[0],
+					pageParentSessionId,
 				);
 			}
 			for (const tabSession of tabSessions) {
 				conn.sessions.delete(tabSession);
-				this.#emit(conn, "Target.detachedFromTarget", { sessionId: tabSession, targetId: tabTargetId(tab.tabId) });
+				this.#emit(
+					conn,
+					"Target.detachedFromTarget",
+					{ sessionId: tabSession, targetId: tabTargetId(tab.tabId) },
+					browserSessionId,
+				);
 			}
 			if (conn.discover && tab.announced) {
-				this.#emit(conn, "Target.targetDestroyed", { targetId: pageTargetId(tab.tabId) });
-				this.#emit(conn, "Target.targetDestroyed", { targetId: tabTargetId(tab.tabId) });
+				this.#emit(conn, "Target.targetDestroyed", { targetId: pageTargetId(tab.tabId) }, conn.discoverSessionId);
+				this.#emit(conn, "Target.targetDestroyed", { targetId: tabTargetId(tab.tabId) }, conn.discoverSessionId);
 			}
 		}
 		tab.announced = false;
@@ -830,17 +1066,49 @@ export class RelayBridge {
 	// ---- session + attach bookkeeping --------------------------------------------
 
 	#mintSession(conn: CdpConnection, kind: "tab" | "page", tabId: number): string {
-		const sessionId = `S${kind === "tab" ? "T" : "P"}${tabId}.${conn.id}.${++this.#sessionSeq}`;
+		const prefix = kind === "tab" ? "ST" : "SP";
+		const sessionId = `${prefix}${tabId}.${conn.id}.${++this.#sessionSeq}`;
 		conn.sessions.set(sessionId, { kind, tabId });
 		return sessionId;
+	}
+
+	#replayExecutionContexts(conn: CdpConnection, tabId: number, sessionId: string): void {
+		const tab = this.#tabs.get(tabId);
+		if (!tab) return;
+		for (const params of tab.executionContexts.values()) {
+			let replayParams = params;
+			const context = params.context;
+			if (tab.mainFrameId && context && typeof context === "object") {
+				const auxData = "auxData" in context ? context.auxData : undefined;
+				if (auxData && typeof auxData === "object" && "frameId" in auxData && auxData.frameId === tab.mainFrameId) {
+					replayParams = {
+						...params,
+						context: {
+							...context,
+							auxData: { ...auxData, frameId: pageTargetId(tabId) },
+						},
+					};
+				}
+			}
+			this.#emit(conn, "Runtime.executionContextCreated", replayParams, sessionId);
+		}
 	}
 
 	#releaseSession(conn: CdpConnection, sessionId: string, parentSessionId: string | undefined): void {
 		const ref = conn.sessions.get(sessionId);
 		if (!ref) return;
 		conn.sessions.delete(sessionId);
-		const targetId = ref.kind === "tab" ? tabTargetId(ref.tabId) : pageTargetId(ref.tabId);
-		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
+		if (ref.kind === "browser") {
+			if (conn.discoverSessionId === sessionId) {
+				conn.discover = false;
+				conn.discoverSessionId = undefined;
+			}
+			if (conn.autoAttachSessionId === sessionId) {
+				conn.autoAttach = false;
+				conn.autoAttachSessionId = undefined;
+			}
+		}
+		this.#emit(conn, "Target.detachedFromTarget", { sessionId }, parentSessionId);
 	}
 
 	/** Connections currently holding any session on a tab. */
@@ -852,14 +1120,34 @@ export class RelayBridge {
 		return out;
 	}
 
-	#emitTabAttached(conn: CdpConnection, tab: TabState): void {
+	#emitTabAttached(conn: CdpConnection, tab: TabState, parentSessionId = conn.autoAttachSessionId): void {
+		if (conn.flatten) {
+			if (conn.sessionsForTab(tab.tabId, "page").length > 0) return;
+			const sessionId = this.#mintSession(conn, "page", tab.tabId);
+			this.#emit(
+				conn,
+				"Target.attachedToTarget",
+				{
+					sessionId,
+					targetInfo: this.#pageInfo(tab, true),
+					waitingForDebugger: false,
+				},
+				parentSessionId,
+			);
+			return;
+		}
 		if (conn.sessionsForTab(tab.tabId, "tab").length > 0) return;
 		const sessionId = this.#mintSession(conn, "tab", tab.tabId);
-		this.#emit(conn, "Target.attachedToTarget", {
-			sessionId,
-			targetInfo: this.#tabInfo(tab, true),
-			waitingForDebugger: false,
-		});
+		this.#emit(
+			conn,
+			"Target.attachedToTarget",
+			{
+				sessionId,
+				targetInfo: this.#tabInfo(tab, true),
+				waitingForDebugger: false,
+			},
+			parentSessionId,
+		);
 	}
 
 	async #ensureAttached(tab: TabState): Promise<boolean> {
@@ -901,6 +1189,7 @@ export class RelayBridge {
 			url: tab.url || "about:blank",
 			attached,
 			canAccessOpener: false,
+			browserContextId: "default",
 		};
 	}
 
@@ -912,6 +1201,7 @@ export class RelayBridge {
 			url: tab.url || "about:blank",
 			attached,
 			canAccessOpener: false,
+			browserContextId: "default",
 		};
 	}
 

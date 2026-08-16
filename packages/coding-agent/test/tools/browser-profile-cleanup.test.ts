@@ -1,9 +1,6 @@
 /**
- * Regression test for issue #7058: on Windows, puppeteer-core deletes its temp
- * Chrome profile with an unretried `rm()` from an eager process-exit hook, so an
- * EBUSY on the still-locked profile surfaces as an unhandled rejection that
- * crashes OMP. OMP now owns the profile directory and removes it itself with a
- * lock-tolerant, warn-and-leave cleanup.
+ * OMP owns temporary Chromium profiles and removes them with lock-tolerant
+ * retries only after the matching owned process has stopped.
  */
 
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
@@ -56,17 +53,33 @@ describe("headless Chromium profile cleanup (issue #7058)", () => {
 			key: "headless:1",
 			kind: { kind: "headless", headless: true },
 			refCount: 1,
+			cdpEndpoint: "http://127.0.0.1:9222",
 			userDataDir: dir,
-			browser: {
-				connected: true,
-				process: () => ({ pid: 4242 }),
-				close: () => Promise.resolve(),
-			},
-			stealth: { browserSession: null, override: null },
+			ownsUserDataDir: true,
+			ownedProcess: { pid: 4242 },
 		} as unknown as BrowserHandle;
 
 		await releaseBrowser(handle, { kill: false });
 
 		expect(fs.existsSync(dir)).toBe(false);
+	});
+
+	it("never removes a caller-owned browser profile", async () => {
+		const dir = await makeProfileDir();
+		const handle = {
+			key: "spawned:/fixture/chrome",
+			kind: { kind: "spawned", path: "/fixture/chrome" },
+			refCount: 1,
+			cdpEndpoint: "http://127.0.0.1:9222",
+			userDataDir: dir,
+			ownsUserDataDir: false,
+			ownedProcess: { pid: 4242 },
+		} as unknown as BrowserHandle;
+		try {
+			await releaseBrowser(handle, { kill: true });
+			expect(fs.existsSync(dir)).toBe(true);
+		} finally {
+			await fs.promises.rm(dir, { recursive: true, force: true });
+		}
 	});
 });
