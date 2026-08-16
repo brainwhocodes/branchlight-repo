@@ -3,8 +3,10 @@ name: CI
 on:
    push:
       branches: [main]
+      tags: ["v*"]
       paths:
          - "packages/**"
+         - "go/**"
          - "crates/**"
          - "scripts/**"
          - "bazel/**"
@@ -30,6 +32,7 @@ on:
       branches: [main]
       paths:
          - "packages/**"
+         - "go/**"
          - "crates/**"
          - "scripts/**"
          - "bazel/**"
@@ -55,17 +58,12 @@ on:
             type: boolean
             default: false
 
-# Release runs publish a `v*` tag pushed atomically with main HEAD; sharing
-# the cheap branch-wide `CI-refs/heads/main` group meant a later main push
-# silently cancelled the in-flight release and left the tag without a GitHub
-# Release or npm publish (#2564). Detect release runs at workflow-scheduling
-# time via the release-script commit subject (`chore: bump version to vX.Y.Z`),
-# via `v*` tag-ref dispatches, and via manual dispatches whose tag-on-HEAD
-# status is only known after checkout; scope them to a per-sha group with no
-# cancellation. Every other event keeps branch-wide cancellation for PR/main churn.
+# Version tags are the authoritative release trigger. Tag and manual release
+# runs use a per-sha group and are never cancelled by main-branch churn; normal
+# branch and pull-request runs retain cheap ref-scoped cancellation.
 concurrency:
-   group: "${{ github.workflow }}-${{ (startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && format('release-{0}', github.sha) || github.ref }}"
-   cancel-in-progress: "${{ !(startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}"
+   group: "${{ github.workflow }}-${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && format('release-{0}', github.sha) || github.ref }}"
+   cancel-in-progress: "${{ !(startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}"
 
 env:
    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -74,19 +72,14 @@ permissions:
    contents: read
 
 jobs:
-   # scripts/release.ts pushes the version-bump commit and its `v*` tag
-   # atomically (`git push --atomic origin refs/heads/main:refs/heads/main
-   # <sha>:refs/tags/v<version>`), so a release now arrives as a single `push` to
-   # `refs/heads/main` — we no longer trigger on the tag ref at all (see
-   # `on.push`). This one branch-push run is therefore authoritative: it runs the
-   # full build AND, when HEAD carries a release tag, the release/publish jobs.
-   # `release_metadata` resolves that tag once so downstream jobs switch on
-   # `is-release` and address the tag by name — `github.ref` is
-   # `refs/heads/main` here, not the tag. A `workflow_dispatch` from a `v*` tag
-   # ref (or from a tagged main HEAD) is also treated as a release.
+   # A pushed `v*` ref is authoritative for release builds and publishing.
+   # Main still runs normal validation for the version-bump commit, while the
+   # tag run builds the platform binaries in parallel and publishes only after
+   # its own validation gate succeeds. A manual dispatch from a tagged main HEAD
+   # remains a recovery path.
    release_metadata:
       name: Resolve release metadata
-      # Hosted, not omp-kata: this ~20 s git-tag probe gates the whole release
+      # Hosted, not omp-kata: this ~20 s tag probe gates the whole release
       # chain, and queueing it behind the 4-runner kata pool adds dead minutes
       # to the darwin critical path.
       runs-on: ubuntu-22.04
@@ -94,15 +87,12 @@ jobs:
          is-release: ${{ steps.detect.outputs.is-release }}
          release-tag: ${{ steps.detect.outputs.release-tag }}
       steps:
-         # Only a main-branch run needs tags fetched, so `git tag --points-at
-         # HEAD` can see the freshly-pushed `v*`. A tag-ref dispatch reads the
-         # tag straight from `github.ref_name`, and fetching `--tags` while
-         # checkout uses an explicit tag refspec makes git refuse — so scope
-         # fetch-tags to main refs.
+         # Tag-ref runs read the tag from `github.ref_name`. Only a manual
+         # dispatch on main needs fetched tags to recover the tag at HEAD.
          - uses: actions/checkout@v4
            with:
-              fetch-tags: ${{ github.ref == 'refs/heads/main' }}
-         - name: Detect release tag at HEAD
+              fetch-tags: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+         - name: Detect release tag
            id: detect
            shell: bash
            run: |
@@ -113,7 +103,7 @@ jobs:
                   release_tag="${{ github.ref_name }}"
                   ;;
                 refs/heads/main)
-                  if [ "${{ github.event_name }}" != "pull_request" ]; then
+                  if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
                     release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
                   fi
                   ;;
@@ -137,6 +127,22 @@ jobs:
            run: bun run ci:check:full
          - name: Build collab web
            run: bun run collab:web:build
+
+   go_rpc_sdk:
+      name: Test Go RPC SDK
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - uses: actions/setup-go@v6
+           with:
+              go-version-file: go/omp-rpc/go.mod
+              cache-dependency-path: go/omp-rpc/go.sum
+         - name: Test SDK
+           working-directory: go/omp-rpc
+           run: go test ./...
+         - name: Compile Windows SDK
+           working-directory: go/omp-rpc
+           run: GOOS=windows GOARCH=amd64 go test -c -o "${RUNNER_TEMP}/omp-rpc-windows.test.exe" .
 
    # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
    # Native-changing PRs are rare enough that they do not warrant PR-side
@@ -459,6 +465,7 @@ jobs:
       name: Release validation gate
       if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
          needs.rust_validate.result == 'success' &&
+         needs.go_rpc_sdk.result == 'success' &&
          needs.native_addons.result == 'success' &&
          needs.test_workspace.result == 'success' &&
          needs.test_coding_agent_singleton.result == 'success' &&
@@ -468,7 +475,7 @@ jobs:
          needs.test_coding_agent_native.result == 'success' &&
          needs.test_smoke.result == 'success' && needs.check.result == 'success' &&
          needs.install_methods.result == 'success' }}
-      needs: [release_metadata, check, rust_validate, native_addons, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods]
+      needs: [release_metadata, check, go_rpc_sdk, rust_validate, native_addons, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods]
       runs-on: ubuntu-22.04
       steps:
          - run: echo "release validation green"

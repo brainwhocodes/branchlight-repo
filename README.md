@@ -267,7 +267,7 @@ Stealth's on by default, so pages see a normal user instead of a headless bot. T
 
 **Desktop & web**
 
-- `browser` — Puppeteer tabs over headless Chromium, CDP-attached apps, or your own Chrome via the relay.
+- `browser` — Playwright 1.62.1 tabs over headless Chromium, CDP-attached apps, or your own Chrome via the OMP Browser Relay.
 - `computer` — persistent JS against the host desktop: windows, screenshots, native input, AX tree, clipboard.
 - `web_search` — one query across configured providers, returning answer plus citations.
 - `github` — GitHub CLI ops — repo, PR, issues, code search, Actions run-watch.

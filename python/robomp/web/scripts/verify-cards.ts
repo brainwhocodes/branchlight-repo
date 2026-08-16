@@ -5,8 +5,8 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { HTTPRequest } from "puppeteer-core";
-import puppeteer from "puppeteer-core";
+import type { Browser, BrowserContext, Page, Request } from "playwright-core";
+import { chromium } from "playwright-core";
 import type { StatusResponse } from "../src/types";
 
 const VIEWPORT = { width: 1280, height: 720, deviceScaleFactor: 1 } as const;
@@ -288,19 +288,24 @@ async function main(): Promise<void> {
   const chrome = await resolveChrome(undefined);
   console.log(`Chrome resolved: ${chrome}`);
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath: chrome,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      `--window-size=${VIEWPORT.width},${VIEWPORT.height}`,
-    ],
-    defaultViewport: { ...VIEWPORT },
-  });
-
-  const page = await browser.newPage();
-  await page.setRequestInterception(true);
+  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      executablePath: chrome,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        `--window-size=${VIEWPORT.width},${VIEWPORT.height}`,
+      ],
+    });
+    context = await browser.newContext({
+      viewport: { width: VIEWPORT.width, height: VIEWPORT.height },
+      deviceScaleFactor: VIEWPORT.deviceScaleFactor,
+    });
+    const page: Page = await context.newPage();
+    try {
 
   let statusMock: StatusResponse = baseStatus;
   let statusDelayMs = 0;
@@ -314,88 +319,94 @@ async function main(): Promise<void> {
   // instead of reaching into `unknown`.
   const triggeredRequests: { url: string; method: string; headers: Record<string, string>; body: Record<string, unknown> | null }[] = [];
 
-  page.on("request", async (req: HTTPRequest) => {
-    const url = new URL(req.url());
+    await page.route("**/*", async (route, req: Request) => {
+      const url = new URL(req.url());
 
-    if (req.resourceType() === "document" && customIndexHtml !== null) {
-      req.respond({
-        status: 200,
-        contentType: "text/html",
-        body: customIndexHtml,
-      });
-      return;
-    }
-
-    if (url.pathname === "/api/status") {
-      if (statusDelayMs > 0) {
-        await Bun.sleep(statusDelayMs);
-      }
-      req.respond({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(statusMock),
-      });
-    } else if (url.pathname === "/api/logs") {
-      req.respond({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ entries: [], count: 0, limit: 400 }),
-      });
-    } else if (url.pathname === "/api/github/issues") {
-      req.respond({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ issues: [], errors: [], repos: ["octo/widget"], cache: { hit: false, fetched_at: 0 } }),
-      });
-    } else if (url.pathname === "/api/trigger" && req.method() === "POST") {
-      const parsedBody: Record<string, unknown> | null = req.postData() ? (JSON.parse(req.postData()!) as Record<string, unknown>) : null;
-      const deliveryId = parsedBody?.delivery_id;
-      const mode = parsedBody?.mode;
-      triggeredRequests.push({
-        url: req.url(),
-        method: req.method(),
-        headers: req.headers() as Record<string, string>,
-        body: parsedBody,
-      });
-      if (triggerErrorDetail !== null) {
-        req.respond({
-          status: 500,
-          contentType: "application/json",
-          body: JSON.stringify({ detail: triggerErrorDetail }),
+      if (req.resourceType() === "document" && customIndexHtml !== null) {
+        await route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: customIndexHtml,
         });
-      } else {
-        req.respond({
+        return;
+      }
+
+      if (url.pathname === "/api/status") {
+        if (statusDelayMs > 0) {
+          await Bun.sleep(statusDelayMs);
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(statusMock),
+        });
+      } else if (url.pathname === "/api/logs") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ entries: [], count: 0, limit: 400 }),
+        });
+      } else if (url.pathname === "/api/github/issues") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ issues: [], errors: [], repos: ["octo/widget"], cache: { hit: false, fetched_at: 0 } }),
+        });
+      } else if (url.pathname === "/api/trigger" && req.method() === "POST") {
+        const postData = req.postData();
+        const parsedBody: Record<string, unknown> | null = postData
+          ? (JSON.parse(postData) as Record<string, unknown>)
+          : null;
+        const deliveryId = parsedBody?.delivery_id;
+        const mode = parsedBody?.mode;
+        triggeredRequests.push({
+          url: req.url(),
+          method: req.method(),
+          headers: req.headers(),
+          body: parsedBody,
+        });
+        if (triggerErrorDetail !== null) {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: triggerErrorDetail }),
+          });
+        } else {
+          await route.fulfill({
+            status: 202,
+            contentType: "application/json",
+            body: JSON.stringify({
+              delivery: (typeof deliveryId === "string" && deliveryId) ? deliveryId : "manual-trigger",
+              state: "queued",
+              mode: (typeof mode === "string" && mode) ? mode : "triage",
+            }),
+          });
+        }
+      } else if (url.pathname === "/api/cancel" && req.method() === "POST") {
+        const postData = req.postData();
+        const parsedBody: Record<string, unknown> | null = postData
+          ? (JSON.parse(postData) as Record<string, unknown>)
+          : null;
+        const deliveryId = parsedBody?.delivery_id;
+        triggeredRequests.push({
+          url: req.url(),
+          method: req.method(),
+          headers: req.headers(),
+          body: parsedBody,
+        });
+        await route.fulfill({
           status: 202,
           contentType: "application/json",
           body: JSON.stringify({
-            delivery: (typeof deliveryId === "string" && deliveryId) ? deliveryId : "manual-trigger",
-            state: "queued",
-            mode: (typeof mode === "string" && mode) ? mode : "triage",
+            delivery: (typeof deliveryId === "string" && deliveryId) ? deliveryId : "cancel-trigger",
+            fired: false,
+            previous_state: "running",
           }),
         });
+      } else {
+        await route.continue();
       }
-    } else if (url.pathname === "/api/cancel" && req.method() === "POST") {
-      const parsedBody: Record<string, unknown> | null = req.postData() ? (JSON.parse(req.postData()!) as Record<string, unknown>) : null;
-      const deliveryId = parsedBody?.delivery_id;
-      triggeredRequests.push({
-        url: req.url(),
-        method: req.method(),
-        headers: req.headers() as Record<string, string>,
-        body: parsedBody,
-      });
-      req.respond({
-        status: 202,
-        contentType: "application/json",
-        body: JSON.stringify({
-          delivery: (typeof deliveryId === "string" && deliveryId) ? deliveryId : "cancel-trigger",
-          fired: false,
-          previous_state: "running",
-        }),
-      });
-    } else {
-      req.continue();
-    }
-  });
+    });
 
   const BASE_URL = "http://127.0.0.1:8099/";
 
@@ -425,7 +436,7 @@ async function main(): Promise<void> {
       repo_allowlist: ["octo/widget", "octo/robomp"],
     },
   };
-  await page.goto(BASE_URL, { waitUntil: "networkidle0" });
+  await page.goto(BASE_URL, { waitUntil: "networkidle" });
   const emptyText = await page.evaluate(() => document.querySelector(".rmp-pipeline-empty")?.textContent ?? "");
   results.push({
     name: "empty-state-allowlist",
@@ -441,12 +452,12 @@ async function main(): Promise<void> {
       document.documentElement.dataset.theme = theme;
       document.documentElement.style.colorScheme = theme;
     }, themeName);
-    await page.reload({ waitUntil: "networkidle0" });
+    await page.reload({ waitUntil: "networkidle" });
   };
 
   // 3. Populated state - Dark Theme
   statusMock = populatedStatus;
-  await page.goto(BASE_URL, { waitUntil: "networkidle0" });
+  await page.goto(BASE_URL, { waitUntil: "networkidle" });
   await applyTheme("dark");
 
   const cards = await page.evaluate(() => {
@@ -850,7 +861,7 @@ async function main(): Promise<void> {
   customIndexHtml = html;
 
   // Reload page to parse with read-only config
-  await page.goto(BASE_URL, { waitUntil: "networkidle0" });
+  await page.goto(BASE_URL, { waitUntil: "networkidle" });
   await applyTheme("dark");
 
   const readonly = await page.evaluate(() => {
@@ -880,8 +891,8 @@ async function main(): Promise<void> {
   customIndexHtml = null; // restore index intercept
 
   // 6. Responsive check
-  await page.setViewport({ width: 380, height: 720 });
-  await page.goto(BASE_URL, { waitUntil: "networkidle0" });
+  await page.setViewportSize({ width: 380, height: 720 });
+  await page.goto(BASE_URL, { waitUntil: "networkidle" });
   await applyTheme("dark");
 
   const responsiveOk = await page.evaluate(() => {
@@ -935,10 +946,10 @@ async function main(): Promise<void> {
   await page.screenshot({ path: path.join(outDir, "shots/responsive-dark.png") });
 
   // Restore viewport
-  await page.setViewport({ ...VIEWPORT });
+  await page.setViewportSize({ width: VIEWPORT.width, height: VIEWPORT.height });
 
   // 7. Reduced motion check.
-  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+  await page.emulateMedia({ reducedMotion: "reduce" });
 
   // 7a. Skeleton phase — delay the status response so the loading skeleton is
   //     actually on screen, then assert its pulse animation is suppressed
@@ -965,7 +976,7 @@ async function main(): Promise<void> {
   // 7b. Populated phase — once cards render, the live stepper node and card
   //     element exist; assert their animation/transition are suppressed too.
   statusMock = populatedStatus;
-  await page.goto(BASE_URL, { waitUntil: "networkidle0" });
+  await page.goto(BASE_URL, { waitUntil: "networkidle" });
   const reducedPopulated = await page.evaluate(() => {
     const liveStepNode = document.querySelector(".rmp-step-node[data-live='true']");
     const nodeStyle = liveStepNode ? window.getComputedStyle(liveStepNode).animationName : "none";
@@ -984,7 +995,7 @@ async function main(): Promise<void> {
   });
 
   // Restore media features
-  await page.emulateMediaFeatures([]);
+  await page.emulateMedia({ reducedMotion: null });
 
   // 8. Interactions (clicks).
   // Serve a replay-enabled index with a KNOWN token so every privileged
@@ -998,7 +1009,7 @@ async function main(): Promise<void> {
   );
   customIndexHtml = replayHtml;
   statusMock = populatedStatus;
-  await page.goto(BASE_URL, { waitUntil: "networkidle0" });
+  await page.goto(BASE_URL, { waitUntil: "networkidle" });
   await applyTheme("dark");
 
   // A. Retry click — exactly one POST /api/trigger {mode:"retry", delivery_id}
@@ -1164,8 +1175,6 @@ async function main(): Promise<void> {
 
   customIndexHtml = null; // restore real-index interception
 
-  // Cleanup browser
-  await browser.close();
 
   // Print results
   console.log("\n--- Verification checks summary ---");
@@ -1186,6 +1195,13 @@ async function main(): Promise<void> {
   console.log(`\nReport written to ${path.join(outDir, "report.json")}`);
 
   process.exitCode = allPass ? 0 : 1;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } finally {
+    await context?.close().catch(() => {});
+    await browser?.close().catch(() => {});
+  }
 }
 
 main().catch(err => {

@@ -133,9 +133,9 @@ cp "$natives_pkg_backup" "$ROOT_DIR/packages/natives/package.json"
 [ "$core_rc" -eq 0 ] || exit "$core_rc"
 
 # 3. Pack the remaining workspace packages (natives core and coding-agent
-#    handled separately). `collab-web` is private but still packed here so its
-#    prepack build and tarball file list stay release-safe.
-for pkg in utils wire omptype hashline catalog ai mnemopi snapcompact agent tui stats collab-web; do
+#    handled separately). `grpc` is packed before its coding-agent consumer.
+#    `collab-web` is private but packed to keep its prepack and file list safe.
+for pkg in utils grpc wire omptype hashline catalog ai mnemopi snapcompact agent tui stats collab-web; do
    (
       cd "$ROOT_DIR/packages/$pkg"
       bun pm pack --destination "$TARBALL_DIR" --quiet >/dev/null
@@ -159,6 +159,7 @@ cp "$agent_pkg_backup" "$ROOT_DIR/packages/coding-agent/package.json"
 [ "$agent_rc" -eq 0 ] || exit "$agent_rc"
 
 utils_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-utils-*.tgz)"
+grpc_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-grpc-*.tgz)"
 wire_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-wire-*.tgz)"
 omptype_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-omptype-*.tgz)"
 natives_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-natives-[0-9]*.tgz)"
@@ -186,6 +187,7 @@ mkdir -p "$TARBALL_APP_DIR"
 		const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
 		pkg.overrides = {
 			'@oh-my-pi/pi-utils': '$utils_tgz',
+			'@oh-my-pi/pi-grpc': '$grpc_tgz',
 			'@oh-my-pi/pi-wire': '$wire_tgz',
 			'@oh-my-pi/omptype': '$omptype_tgz',
 			'@oh-my-pi/pi-natives': '$natives_tgz',
@@ -204,7 +206,7 @@ mkdir -p "$TARBALL_APP_DIR"
 		require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
 	"
 
-   bun add "$utils_tgz" "$wire_tgz" "$omptype_tgz" "$natives_tgz" "$hashline_tgz" "$catalog_tgz" "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$collab_web_tgz"
+   bun add "$utils_tgz" "$grpc_tgz" "$wire_tgz" "$omptype_tgz" "$natives_tgz" "$hashline_tgz" "$catalog_tgz" "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$collab_web_tgz"
    # The platform leaf must arrive through the core's optionalDependencies +
    # override, not as a direct dependency — assert it landed before smoking so a
    # resolution regression is distinguishable from a runtime loader bug.

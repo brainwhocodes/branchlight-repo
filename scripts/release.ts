@@ -33,6 +33,16 @@ export function validateExplicitVersion(version: string): string | null {
 	const match = /^v?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(version);
 	return match ? match[1] : null;
 }
+export function releaseTagNames(version: string, goModulePath: string): readonly [string, string] {
+	const normalized = validateExplicitVersion(version);
+	if (normalized === null) throw new Error(`Invalid release version: ${version}`);
+	const major = Number.parseInt(normalized, 10);
+	const moduleMajor = /\/v([1-9]\d*)$/.exec(goModulePath)?.[1];
+	if ((major >= 2 && moduleMajor !== String(major)) || (major < 2 && moduleMajor !== undefined)) {
+		throw new Error(`Go module ${goModulePath} does not match release major v${major}`);
+	}
+	return [`v${normalized}`, `go/omp-rpc/v${normalized}`];
+}
 
 function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`;
@@ -253,6 +263,10 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		process.exit(1);
 	}
 	console.log(`  Version ${version} > ${latestTag}\n`);
+	const goModuleText = await Bun.file("go/omp-rpc/go.mod").text();
+	const goModulePath = /^module\s+(\S+)$/m.exec(goModuleText)?.[1];
+	if (!goModulePath) throw new Error("go/omp-rpc/go.mod has no module declaration");
+	const releaseTags = releaseTagNames(version, goModulePath);
 
 	// 2. Update package versions
 	console.log(`Updating package versions to ${version}…`);
@@ -370,31 +384,22 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	await git(["commit", "-m", `chore: bump version to ${version}`]);
 	console.log();
 
-	// 8. Tag, then push branch + tag atomically — pushing the tag by object id.
-	//
-	// This repo is in the global `[maintenance] repo = …` list, so a scheduled
-	// `git maintenance run` fetches origin with `fetch.pruneTags=true` (set
-	// globally) and deletes any local tag not yet on the remote — i.e. the
-	// brand-new release tag. The `-c fetch.pruneTags=false` on our git wrapper
-	// only governs our own git calls, not the concurrent maintenance process, so
-	// a local tag ref may vanish before or while the push resolves it.
-	//
-	// A bare push refspec (`refs/tags/v…` with no `:dst`) re-resolves the tag on
-	// disk during refspec matching (git's remote.c:match_explicit); if the prune
-	// lands in that window git dies with
-	// "refs/tags/v… cannot be resolved to branch", and if it lands before the
-	// push it dies with "src refspec … does not match any". We sidestep both by
-	// pushing the HEAD commit object id straight into the remote tag ref
-	// (`<sha>:refs/tags/v…`): the push has no dependency on a local tag, and the
-	// commit is reachable from main so maintenance cannot prune it. The local
-	// tag we still create is only for `git describe`; losing it is harmless. The
-	// default Git LFS pre-push hook uploads the branch's LFS objects as part of
-	// this same atomic push — no separate `git lfs push` is needed.
+	// 8. Tag, then push the branch, root release tag, and nested Go-module tag
+	// atomically. Push tags by object id rather than local refs: global git
+	// maintenance may prune a newly-created local tag before refspec resolution.
+	// The SHA is reachable from main and therefore remains stable throughout the
+	// push. The root `v*` tag triggers the authoritative release workflow; the
+	// `go/omp-rpc/v*` tag publishes the nested Go module at the same commit.
 	console.log("Tagging and pushing to remote...");
-	const tagRef = `v${version}`;
 	const sha = (await git(["rev-parse", "HEAD"]).text()).trim();
-	await git(["tag", "-f", tagRef]);
-	await git(["push", "--atomic", "origin", "refs/heads/main:refs/heads/main", `${sha}:refs/tags/${tagRef}`]);
+	for (const tag of releaseTags) await git(["tag", "-f", tag]);
+	await git([
+		"push",
+		"--atomic",
+		"origin",
+		"refs/heads/main:refs/heads/main",
+		...releaseTags.map(tag => `${sha}:refs/tags/${tag}`),
+	]);
 	console.log();
 
 	// 9. Watch CI
@@ -404,15 +409,15 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	if (success) {
 		console.log(`=== Released v${version} ===`);
 	} else {
-		// CI's `concurrency` block (.github/workflows/ci.yml) recognizes a
-		// release run by its `chore: bump version to vX.Y.Z` subject (#2564),
-		// so retries that keep that subject also get the per-sha, never-cancel
-		// group. Reword the body, not the subject.
+		// Retries move both lockstep release tags to the repair commit. Pushing
+		// the root `v*` tag starts a fresh, per-sha release workflow.
 		console.log("\nTo retry after fixing (repeat until CI passes):");
 		console.log(`  git commit -m "chore: bump version to ${version}" -m "<what was fixed>"`);
-		console.log(`  git tag -f v${version}`);
+		for (const tag of releaseTags) console.log(`  git tag -f ${tag}`);
 		console.log(
-			`  git push --atomic origin refs/heads/main:refs/heads/main "+$(git rev-parse HEAD):refs/tags/v${version}"`,
+			`  git push --atomic origin refs/heads/main:refs/heads/main ${releaseTags
+				.map(tag => `"+$(git rev-parse HEAD):refs/tags/${tag}"`)
+				.join(" ")}`,
 		);
 		console.log("  bun scripts/release.ts watch");
 		process.exit(1);

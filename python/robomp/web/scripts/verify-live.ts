@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import puppeteer from "puppeteer-core";
+import type { Browser, BrowserContext, Page } from "playwright-core";
+import { chromium } from "playwright-core";
 
 const VIEWPORT = { width: 1280, height: 720, deviceScaleFactor: 1 } as const;
 
@@ -36,27 +37,33 @@ async function main(): Promise<void> {
   await fs.mkdir(outDir, { recursive: true });
 
   const chrome = await resolveChrome(undefined);
-  const browser = await puppeteer.launch({
-    headless: true,
-    executablePath: chrome,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    defaultViewport: { ...VIEWPORT }
-  });
-
-  const page = await browser.newPage();
+  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      executablePath: chrome,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    context = await browser.newContext({
+      viewport: { width: VIEWPORT.width, height: VIEWPORT.height },
+      deviceScaleFactor: VIEWPORT.deviceScaleFactor,
+    });
+    const page: Page = await context.newPage();
+    try {
   const BASE_URL = "http://127.0.0.1:8099/";
   // The server at BASE_URL must be serving a FRESHLY built bundle (run
   // `bun run build` immediately before launching it); this script intentionally
   // performs no build step of its own.
 
   // Load page, set dark theme, reload
-  await page.goto(BASE_URL, { waitUntil: "networkidle0" });
+  await page.goto(BASE_URL, { waitUntil: "networkidle" });
   await page.evaluate(() => {
     localStorage.setItem("omp-robomp-theme", "dark");
     document.documentElement.dataset.theme = "dark";
     document.documentElement.style.colorScheme = "dark";
   });
-  await page.reload({ waitUntil: "networkidle0" });
+  await page.reload({ waitUntil: "networkidle" });
 
   // 5c. Assertions on the seeded cards
   const cards = await page.evaluate(() => {
@@ -169,7 +176,13 @@ async function main(): Promise<void> {
 
   console.log("Live capstone round-trip checks PASS!");
 
-  await browser.close();
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } finally {
+    await context?.close().catch(() => {});
+    await browser?.close().catch(() => {});
+  }
 }
 
 main().catch(err => {

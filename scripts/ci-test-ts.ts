@@ -88,6 +88,7 @@ const codingAgentBucketPlans: Record<CodingAgentBucket, { label: string; paralle
 const fastWorkspacePackages = [
 	"packages/hashline",
 	"packages/wire",
+	"packages/grpc",
 	"packages/omptype",
 	"packages/utils",
 	"packages/catalog",

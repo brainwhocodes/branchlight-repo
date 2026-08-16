@@ -35,7 +35,7 @@ async function extractTailwindClasses(dir: string): Promise<Set<string>> {
 await fs.rm("./dist/client", { recursive: true, force: true });
 
 // Build Tailwind CSS
-console.log("Building Tailwind CSS...");
+console.log("Building stats dashboard Tailwind CSS...");
 const sourceCss = await Bun.file("./src/client/styles.css").text();
 const candidates = await extractTailwindClasses("./src/client");
 const baseDir = path.resolve("./src/client");
@@ -48,7 +48,7 @@ const tailwindOutput = compiler.build([...candidates]);
 await Bun.write("./dist/client/styles.css", tailwindOutput);
 
 // Build React app
-console.log("Building React app...");
+console.log("Building stats dashboard React client...");
 const result = await Bun.build({
 	entrypoints: ["./src/client/index.tsx"],
 	outdir: "./dist/client",
@@ -92,4 +92,4 @@ const indexHtml = `<!DOCTYPE html>
 
 await Bun.write("./dist/client/index.html", indexHtml);
 
-console.log("Build complete");
+console.log("Stats dashboard build complete");

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { validateExplicitVersion } from "./release";
+import { releaseTagNames, validateExplicitVersion } from "./release";
 
 describe("validateExplicitVersion", () => {
 	test("rejects malformed versions", () => {
@@ -41,5 +41,20 @@ describe("validateExplicitVersion", () => {
 	test("accepts leading v prefix and normalizes to the bare version", () => {
 		expect(validateExplicitVersion("v17.2.8")).toBe("17.2.8");
 		expect(validateExplicitVersion("V17.2.8")).toBe(null);
+	});
+});
+
+describe("releaseTagNames", () => {
+	test("publishes the root release and nested Go module from the same version", () => {
+		expect(releaseTagNames("17.2.12", "github.com/can1357/oh-my-pi/go/omp-rpc/v17")).toEqual([
+			"v17.2.12",
+			"go/omp-rpc/v17.2.12",
+		]);
+	});
+
+	test("rejects a Go semantic-import major that differs from the release", () => {
+		expect(() => releaseTagNames("18.0.0", "github.com/can1357/oh-my-pi/go/omp-rpc/v17")).toThrow(
+			"does not match release major v18",
+		);
 	});
 });
