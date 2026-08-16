@@ -27,13 +27,15 @@ jobs:
           path.write_text(path.read_text().replace("\\t", "\t"))
           PY
           python3 .github/scripts/apply-ci-fixes.py
+          python3 .github/scripts/apply-changelog-ci-fix.py
 
           bun install --frozen-lockfile
           bunx biome format --write \
             packages/utils/src/local-runtime.ts \
             packages/coding-agent/src/cli.ts \
             packages/coding-agent/src/tools/computer/worker-entry.ts \
-            packages/coding-agent/test/export-html-template.test.ts
+            packages/coding-agent/test/export-html-template.test.ts \
+            packages/coding-agent/test/utils/changelog.test.ts
 
           bun --cwd=packages/utils run check
 
@@ -62,6 +64,7 @@ jobs:
 
           rm .github/workflows/ci-fix-process-identity.yml
           rm .github/scripts/apply-ci-fixes.py
+          rm .github/scripts/apply-changelog-ci-fix.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
@@ -69,8 +72,10 @@ jobs:
             packages/coding-agent/src/cli.ts \
             packages/coding-agent/src/tools/computer/worker-entry.ts \
             packages/coding-agent/test/export-html-template.test.ts \
+            packages/coding-agent/test/utils/changelog.test.ts \
             packages/coding-agent/src/export/html/tool-views.generated.js \
             .github/workflows/ci-fix-process-identity.yml \
-            .github/scripts/apply-ci-fixes.py
+            .github/scripts/apply-ci-fixes.py \
+            .github/scripts/apply-changelog-ci-fix.py
           git commit -m "fix: restore portable process identity and lazy CLI startup"
           git push origin HEAD:feat/omp-chat-workspace
