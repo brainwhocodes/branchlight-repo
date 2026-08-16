@@ -4,7 +4,7 @@ import type { ComputerWorkerInbound, ComputerWorkerTransport } from "./protocol"
 
 let started = false;
 
-/** Starts the computer worker once while keeping lightweight health checks addon-free. */
+/** Starts the worker once while keeping health checks and the close handshake addon-free. */
 export function startComputerWorker(): void {
 	if (started || !parentPort) return;
 	started = true;
