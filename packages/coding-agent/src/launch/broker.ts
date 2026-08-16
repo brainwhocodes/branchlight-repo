@@ -3,7 +3,23 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import {
+	authenticateLocalToken,
+	captureProcessIdentity,
+	encodeLocalJsonlFrame,
+	ensureSecureRuntimeRoot,
+	inspectProcessIdentity,
+	isEexist,
+	isEnoent,
+	LocalJsonlDecoder,
+	logger,
+	postmortem,
+	procmgr,
+	readControlToken,
+	sanitizeText,
+	setProcessName,
+	shutdownProcessTree,
+} from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
@@ -93,6 +109,7 @@ interface ManagedDaemon {
 interface BrokerLease {
 	path: string;
 	instanceId: string;
+	startToken: string;
 }
 
 interface DaemonLogRead {
@@ -287,31 +304,43 @@ class DaemonLog {
 
 async function acquireBrokerLease(runtimeDir: string): Promise<BrokerLease | null> {
 	const pidPath = path.join(runtimeDir, PID_FILE);
+	const own = await captureProcessIdentity(process.pid);
+	if (!own.identity || own.status !== "matched")
+		throw new Error("Unable to establish verified broker process identity");
 	for (let attempt = 0; attempt < 2; attempt++) {
 		try {
 			const handle = await fs.open(pidPath, "wx", 0o600);
 			const instanceId = crypto.randomUUID();
 			try {
-				await handle.writeFile(JSON.stringify({ pid: process.pid, instanceId }), "utf8");
+				await handle.writeFile(
+					JSON.stringify({ pid: process.pid, startToken: own.identity.startToken, instanceId }),
+					"utf8",
+				);
 			} finally {
 				await handle.close();
 			}
-			return { path: pidPath, instanceId };
+			return { path: pidPath, instanceId, startToken: own.identity.startToken };
 		} catch (error) {
 			if (!isEexist(error)) throw error;
+			let reclaim = false;
 			try {
 				const raw: unknown = await Bun.file(pidPath).json();
-				if (typeof raw === "object" && raw !== null && "pid" in raw && typeof raw.pid === "number") {
-					try {
-						process.kill(raw.pid, 0);
-						return null;
-					} catch {
-						// Stale PID file; the next loop iteration claims it.
-					}
+				if (
+					typeof raw === "object" &&
+					raw !== null &&
+					"pid" in raw &&
+					typeof raw.pid === "number" &&
+					"startToken" in raw &&
+					typeof raw.startToken === "string"
+				) {
+					const inspection = await inspectProcessIdentity({ pid: raw.pid, startToken: raw.startToken });
+					reclaim = inspection.status === "dead";
 				}
 			} catch {
-				// Malformed or partially-written PID files are stale.
+				// Keep malformed or partially-written lease files: fail closed.
+				return null;
 			}
+			if (!reclaim) return null;
 			await fs.rm(pidPath, { force: true });
 		}
 	}
@@ -321,7 +350,14 @@ async function acquireBrokerLease(runtimeDir: string): Promise<BrokerLease | nul
 async function releaseBrokerLease(lease: BrokerLease): Promise<void> {
 	try {
 		const raw: unknown = await Bun.file(lease.path).json();
-		if (typeof raw === "object" && raw !== null && "instanceId" in raw && raw.instanceId === lease.instanceId) {
+		if (
+			typeof raw === "object" &&
+			raw !== null &&
+			"instanceId" in raw &&
+			raw.instanceId === lease.instanceId &&
+			"startToken" in raw &&
+			raw.startToken === lease.startToken
+		) {
 			await fs.rm(lease.path, { force: true });
 		}
 	} catch (error) {
@@ -422,21 +458,18 @@ class DaemonBroker {
 	#accept(socket: net.Socket): void {
 		this.#sockets.add(socket);
 		let authenticated = false;
-		let buffer = "";
+		const decoder = new LocalJsonlDecoder(MAX_REQUEST_BYTES);
 		socket.setEncoding("utf8");
 		socket.on("data", chunk => {
-			buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
-			if (Buffer.byteLength(buffer, "utf8") > MAX_REQUEST_BYTES) {
-				socket.destroy(new Error("Daemon broker request exceeds size limit"));
+			let decodedFrames: unknown[];
+			try {
+				decodedFrames = decoder.push(chunk);
+			} catch (error) {
+				socket.destroy(error instanceof Error ? error : new Error(String(error)));
 				return;
 			}
-			for (;;) {
-				const newline = buffer.indexOf("\n");
-				if (newline < 0) break;
-				const line = buffer.slice(0, newline);
-				buffer = buffer.slice(newline + 1);
-				if (!line) continue;
-				void this.#handleLine(socket, line, () => {
+			for (const decoded of decodedFrames) {
+				void this.#handleLine(socket, decoded, () => {
 					if (authenticated) return;
 					authenticated = true;
 					this.#clients.add(socket);
@@ -458,14 +491,12 @@ class DaemonBroker {
 			}
 		});
 	}
-
-	async #handleLine(socket: net.Socket, line: string, onAuthenticated: () => void): Promise<void> {
+	async #handleLine(socket: net.Socket, decoded: unknown, onAuthenticated: () => void): Promise<void> {
 		let id = "unknown";
 		try {
-			const decoded: unknown = JSON.parse(line);
 			const request = parseDaemonWireRequest(decoded);
 			id = request.id;
-			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
+			authenticateLocalToken(request.token, this.#token);
 			onAuthenticated();
 			for (const owner of request.completionUnsubscribes ?? []) {
 				const subscriptionId = this.#completionSubscriptions.get(owner);
@@ -525,7 +556,7 @@ class DaemonBroker {
 					});
 					if (previous?.socket === socket && !replayOwners.has(owner)) continue;
 					for (const completion of this.#pendingCompletions.get(owner)?.values() ?? []) {
-						socket.write(`${JSON.stringify(completion)}\n`);
+						socket.write(encodeLocalJsonlFrame(completion));
 					}
 				}
 				for (const owner of detachedOwners) {
@@ -540,11 +571,11 @@ class DaemonBroker {
 				}
 			}
 			const result = await this.#dispatch(request.operation);
-			socket.write(`${JSON.stringify({ id, ok: true, result })}\n`);
+			socket.write(encodeLocalJsonlFrame({ id, ok: true, result }));
 			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			socket.write(`${JSON.stringify({ id, ok: false, error: message })}\n`);
+			socket.write(encodeLocalJsonlFrame({ id, ok: false, error: message }));
 		}
 	}
 
@@ -921,7 +952,7 @@ class DaemonBroker {
 		this.#pendingCompletions.set(completion.owner, pending);
 		const registration = this.#ownerSockets.get(completion.owner);
 		if (!registration || registration.socket.destroyed) return;
-		registration.socket.write(`${JSON.stringify(completion)}\n`);
+		registration.socket.write(encodeLocalJsonlFrame(completion));
 	}
 
 	async #settle(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
@@ -1095,7 +1126,12 @@ class DaemonBroker {
 				if (operation.signal === "SIGINT") record.pty.write("\u0003");
 				else record.pty.kill();
 			} else {
-				const processRef = record.snapshot.pid === undefined ? null : Process.fromPid(record.snapshot.pid);
+				const pid = record.snapshot.pid;
+				const captured = pid === undefined ? undefined : await captureProcessIdentity(pid);
+				if (!captured?.identity || captured.status !== "matched") {
+					throw new Error(`Daemon ${operation.name} process identity is unavailable`);
+				}
+				const processRef = Process.fromPid(captured.identity.pid);
 				if (!processRef) throw new Error(`Daemon ${operation.name} process is unavailable`);
 				processRef.killTree(SIGNAL_NUMBER[operation.signal]);
 			}
@@ -1119,9 +1155,13 @@ class DaemonBroker {
 		}
 		record.snapshot.state = "stopping";
 		this.#persist(record);
-		const processRef = record.snapshot.pid === undefined ? null : Process.fromPid(record.snapshot.pid);
-		if (processRef) await processRef.terminate({ group: true, gracefulMs: timeoutMs, timeoutMs: timeoutMs + 1_000 });
-		else record.pty?.kill();
+		const pid = record.snapshot.pid;
+		const captured = pid === undefined ? undefined : await captureProcessIdentity(pid);
+		if (captured?.identity && captured.status === "matched") {
+			await shutdownProcessTree(captured.identity, { gracefulMs: timeoutMs, forceMs: 1_000 });
+		} else if (record.pty) {
+			record.pty.kill();
+		}
 		const settled = await this.#waitUntil(record, () => terminalState(record.snapshot.state), timeoutMs + 1_000);
 		if (!settled && record.pty) record.pty.kill();
 	}
@@ -1230,9 +1270,6 @@ class DaemonBroker {
 					// Reap only records that were still alive when the previous broker
 					// exited; already-terminal records keep their real exit time so
 					// `list` ranks exited history by true recency (issue #6517).
-					if (!terminalState(snapshot.state) && processRef) {
-						await processRef.terminate({ group: true, gracefulMs: 500, timeoutMs: 2_000 });
-					}
 					reapRecoveredSnapshot(snapshot, Date.now());
 				} else if (snapshot.state === "restarting") {
 					snapshot.state = spec.ready ? "starting" : "running";
@@ -1351,11 +1388,11 @@ export async function startDaemonBrokerFromEnvironment(): Promise<void> {
 	delete process.env[DAEMON_IDLE_GRACE_ENV];
 	const parsedGrace = rawGrace === undefined ? DEFAULT_IDLE_GRACE_MS : Number.parseInt(rawGrace, 10);
 	const idleGraceMs = Number.isFinite(parsedGrace) && parsedGrace >= 0 ? parsedGrace : DEFAULT_IDLE_GRACE_MS;
-	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+	await ensureSecureRuntimeRoot(runtimeDir);
 	const lease = await acquireBrokerLease(runtimeDir);
 	if (!lease) return;
 	setProcessName("omp daemon broker");
-	const token = (await Bun.file(path.join(runtimeDir, TOKEN_FILE)).text()).trim();
+	const token = await readControlToken(runtimeDir, TOKEN_FILE);
 	if (!token) throw new Error("Daemon broker token is empty");
 	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());

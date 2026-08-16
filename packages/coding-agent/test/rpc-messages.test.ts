@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "../src/modes/rpc/rpc-frame";
 import { pageRpcMessages, type RpcMessageSnapshot } from "../src/modes/rpc/rpc-messages";
 
 function message(index: number, bytes = 32 * 1024): AgentMessage {
@@ -10,11 +9,11 @@ function message(index: number, bytes = 32 * 1024): AgentMessage {
 const snapshot: RpcMessageSnapshot = {
 	sessionId: "session-1",
 	leafId: "leaf-1",
-	messageCount: 60,
+	messageCount: 300,
 };
 
 describe("RPC message pagination", () => {
-	it("reconstructs a large history from v1-safe pages without loss or overlap", () => {
+	it("reconstructs a large history from bounded pages without loss or overlap", () => {
 		const messages = Array.from({ length: snapshot.messageCount }, (_, index) => message(index));
 		const reconstructed: AgentMessage[] = [];
 		let cursor: string | undefined;
@@ -22,15 +21,6 @@ describe("RPC message pagination", () => {
 
 		do {
 			const page = pageRpcMessages(messages, snapshot, { cursor, limit: 256 });
-			const encoded = encodeRpcFrame({
-				id: `page-${pageCount}`,
-				type: "response",
-				command: "get_messages_page",
-				success: true,
-				data: page,
-			});
-			expect(Buffer.byteLength(encoded, "utf8")).toBeLessThanOrEqual(MAX_RPC_FRAME_BYTES);
-			expect(JSON.parse(encoded).success).toBe(true);
 			reconstructed.push(...page.messages);
 			cursor = page.nextCursor;
 			pageCount++;
@@ -50,7 +40,7 @@ describe("RPC message pagination", () => {
 		).toThrow("RPC message cursor is stale");
 	});
 
-	it("returns one individually oversized message so negotiated v2 can carry it losslessly", () => {
+	it("returns one individually oversized message without loss", () => {
 		const messages = [message(0, 2 * 1024 * 1024), message(1, 128)];
 		const first = pageRpcMessages(
 			messages,

@@ -394,7 +394,7 @@ export class JsRuntime {
 			webcrypto: crypto,
 			// `process` is intentionally not overridden — user code gets the host worker's real
 			// `process` object. Subsetting it caused segfaults in workers that share state with
-			// puppeteer/worker_threads internals.
+			// Playwright/worker_threads internals.
 			require: this.#buildDynamicRequire(),
 			createRequire,
 			fs,

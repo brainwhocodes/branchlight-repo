@@ -104,11 +104,11 @@ async function parseProgram(code: string): Promise<{ program: { body: ReadonlyAr
 	}
 }
 
-// Callee substituted for dynamic `import(...)` calls. Functions handed to puppeteer
+// Callee substituted for dynamic `import(...)` calls. Functions handed to Playwright
 // (`tab.evaluate`, `page.evaluate`, `waitForFunction`, `$$eval`, ...) are serialized with
 // `Function.prototype.toString()` and re-evaluated inside the browser page, where the
-// worker-injected `__omp_import__` global does not exist. The swap therefore guards on the
-// helper's presence and falls back to native dynamic import, so serialized code keeps
+// worker-injected `__omp_import__` global does not exist. The swap therefore guards on
+// the helper's presence and falls back to native dynamic import, so serialized code keeps
 // working in foreign realms while in-worker code still resolves against the session cwd.
 const DYNAMIC_IMPORT_CALLEE = '(typeof __omp_import__ === "function" ? __omp_import__ : (s, o) => import(s, o))';
 

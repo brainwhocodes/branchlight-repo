@@ -1,5 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import * as os from "node:os";
+import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { defineRpcClientTool, RpcClient } from "@oh-my-pi/pi-coding-agent/modes";
@@ -9,19 +8,8 @@ import type {
 	RpcHostToolCancelRequest,
 	RpcHostToolUpdate,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-const tempPaths: string[] = [];
-
-afterEach(async () => {
-	await Promise.all(
-		tempPaths.splice(0).map(async filePath => {
-			try {
-				await removeWithRetries(filePath);
-			} catch {}
-		}),
-	);
-});
+const fixturePath = path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts");
 
 describe("RpcHostToolBridge", () => {
 	it("forwards host tool updates and results to the pending execution", async () => {
@@ -116,80 +104,9 @@ describe("RpcHostToolBridge", () => {
 
 describe("RpcClient custom tools", () => {
 	it("registers host custom tools and serves tool calls over the RPC transport", async () => {
-		const scriptPath = path.join(os.tmpdir(), `omp-rpc-host-tools-${Date.now()}.js`);
-		tempPaths.push(scriptPath);
-		await Bun.write(
-			scriptPath,
-			`
-const encoder = new TextEncoder();
-let buffer = "";
-
-function write(frame) {
-	process.stdout.write(JSON.stringify(frame) + "\\n");
-}
-
-write({ type: "ready" });
-
-process.stdin.on("data", chunk => {
-	buffer += chunk.toString("utf8");
-	let index = buffer.indexOf("\\n");
-	while (index !== -1) {
-		const line = buffer.slice(0, index).trim();
-		buffer = buffer.slice(index + 1);
-		if (line) handle(JSON.parse(line));
-		index = buffer.indexOf("\\n");
-	}
-});
-
-function handle(frame) {
-	if (frame.type === "set_host_tools") {
-		write({
-			id: frame.id,
-			type: "response",
-			command: "set_host_tools",
-			success: true,
-			data: { toolNames: frame.tools.map(tool => tool.name) },
-		});
-		return;
-	}
-	if (frame.type === "prompt") {
-		write({ id: frame.id, type: "response", command: "prompt", success: true });
-		write({ type: "agent_start" });
-		write({
-			type: "host_tool_call",
-			id: "host-call-1",
-			toolCallId: "toolu_host_1",
-			toolName: "echo_host",
-			arguments: { message: "hello" },
-		});
-		return;
-	}
-	if (frame.type === "host_tool_update") {
-		write({
-			type: "tool_execution_update",
-			toolCallId: "toolu_host_1",
-			toolName: "echo_host",
-			args: { message: "hello" },
-			partialResult: frame.partialResult,
-		});
-		return;
-	}
-	if (frame.type === "host_tool_result") {
-		write({
-			type: "tool_execution_end",
-			toolCallId: "toolu_host_1",
-			toolName: "echo_host",
-			result: frame.result,
-			isError: frame.isError === true,
-		});
-		write({ type: "agent_end", messages: [] });
-	}
-}
-`,
-		);
-
 		const client = new RpcClient({
-			cliPath: scriptPath,
+			cliPath: fixturePath,
+			env: { MOCK_RPC_SCENARIO: "host-tools" },
 			customTools: [
 				defineRpcClientTool<{ message: string }>({
 					name: "echo_host",
@@ -230,7 +147,7 @@ function handle(frame) {
 				content: [{ type: "text", text: "working:hello" }],
 			});
 		} finally {
-			client.stop();
+			await client.stop();
 		}
 	});
 });

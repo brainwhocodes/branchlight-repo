@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Breaking Changes
+
+- Replaced the custom stdin/stdout JSONL RPC transport with an authenticated, interoperable gRPC bidirectional stream over loopback HTTP/2.
+
 ### Added
 
 - Added the opt-in `privileged_exec` plugin tool with process-local sudo credential sharing and masked UI prompts that never enter session transcripts.
@@ -8,17 +12,25 @@
 - Added provider exclusions for native image generation so hosts can prevent unsupported providers from being selected as fallbacks or per-request overrides.
 - Added bounded working-tree file diffs and lazy OpenRouter upstream discovery to the RPC protocol for desktop and other external hosts.
 - Added persisted per-model OpenRouter provider exclusions, applied consistently to primary, advisor, handoff, and side-channel requests.
-- Added the Branchlight desktop PTY worker and repository-aware argument-free `omp` launcher.
+- Added the repository-aware argument-free `omp` launcher for Branchlight.
+- Added persisted per-provider OAuth account routing locks with optional sibling failover across agent, SDK, task, commit, cleanse, model, benchmark, and web-search startup paths.
+- Added an OAuth account manager to Providers settings for choosing, adding, and removing stored accounts and configuring failover.
+- Added configured and active OAuth account routing details to interactive and headless `/usage` reports.
+- Added process uptime and memory metrics to RPC state so supervisors can monitor resident agent runtimes.
 
 ### Changed
 
 - Changed ChatGPT/Codex subscription image generation to use the Codex Responses API's native `image_generation` tool, routed through the connected GPT model and backed by `gpt-image-2`; custom proxies keep their hosted Responses base URL.
 - Changed image generation to emit an immediate progress update while the provider is still generating the image.
-- Changed the browser tool to inherit Branchlight's loopback CDP endpoint and resolve non-default browser tool names against named workspace tabs.
-
+- Changed Branchlight browser automation to fail closed until an authenticated pane-scoped runtime broker is available; explicit non-Branchlight connected, spawned, relay, and cmux backends remain unchanged.
+- Replaced the browser tool's Puppeteer CDP runtime with Playwright 1.62.1 while preserving the public browser actions, selectors, navigation waits, shared-browser ownership, and relay behavior.
 ### Fixed
 
+- Fixed structured element selection delivery to serialize object DOM snapshots without `[object Object]` formatting and ensure single-shot event subscription per session.
+- Fixed Branchlight terminal startup so utility commands do not attach phantom agents, while real OMP sessions attach and detach through the runtime-scoped terminal lease.
+
 - Fixed explicit image-generation requests, including requests in resumed conversations, choosing programmatic SVG or browser screenshot fallbacks instead of the native image generator.
+- Fixed interactive `/usage` reports averaging locked OAuth accounts with sibling accounts instead of showing each account's usage independently.
 
 ## [17.2.12] - 2026-08-08
 

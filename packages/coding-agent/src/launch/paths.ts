@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { getDaemonRuntimeDir } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir, secureRuntimeEndpoint } from "@oh-my-pi/pi-utils";
 
 /** Resolve the private runtime directory shared by omp processes in one project directory. */
 export { getDaemonRuntimeDir as daemonRuntimeDir };
@@ -10,5 +10,5 @@ export function daemonBrokerEndpoint(projectDir: string, runtimeDir: string): st
 		const key = Bun.hash.wyhash(path.resolve(projectDir)).toString(16).padStart(16, "0");
 		return `\\\\.\\pipe\\omp-daemon-${key}`;
 	}
-	return path.join(runtimeDir, "broker.sock");
+	return secureRuntimeEndpoint(runtimeDir, "broker.sock");
 }

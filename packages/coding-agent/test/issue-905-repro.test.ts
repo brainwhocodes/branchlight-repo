@@ -12,12 +12,14 @@
  * extension-registered providers/models appear in the output.
  */
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
-import { AuthStorage } from "@oh-my-pi/pi-ai";
-import { runModelsListing } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { runModelsCommand, runModelsListing } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { credentialPinHash } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
+import { getAgentDbPath, getAgentDir, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 
 let tmp: TempDir;
 let extPath: string;
@@ -145,6 +147,90 @@ test("omp models surfaces extension-registered providers (issue #905)", async ()
 		expect(output).toContain("test-model");
 	} finally {
 		authStorage.close();
+	}
+});
+
+test("omp models installs persisted OAuth routing before its first registry refresh", async () => {
+	const originalAgentDir = getAgentDir();
+	const originalProjectDir = getProjectDir();
+	const agentDir = tmp.join("models-policy-agent");
+	const projectDir = tmp.join("models-policy-project");
+	const selectedIdentityHash = credentialPinHash("anthropic", {
+		accountId: "models-account-b",
+		email: "models-b@example.com",
+	});
+	if (!selectedIdentityHash) throw new Error("expected a stable models account identity");
+
+	await fs.mkdir(agentDir, { recursive: true });
+	await fs.mkdir(projectDir, { recursive: true });
+	await fs.mkdir(`${agentDir}/data`, { recursive: true });
+	const store = await SqliteAuthCredentialStore.open(getAgentDbPath(agentDir));
+	store.saveOAuth("anthropic", {
+		access: "sk-ant-oat-models-a",
+		refresh: "refresh-models-a",
+		expires: Date.now() + 3_600_000,
+		accountId: "models-account-a",
+		email: "models-a@example.com",
+	});
+	store.saveOAuth("anthropic", {
+		access: "sk-ant-oat-models-b",
+		refresh: "refresh-models-b",
+		expires: Date.now() + 3_600_000,
+		accountId: "models-account-b",
+		email: "models-b@example.com",
+	});
+	const selectedRow = store
+		.listAuthCredentials("anthropic")
+		.find(row => row.credential.type === "oauth" && row.credential.email === "models-b@example.com");
+	if (!selectedRow) throw new Error("expected the selected models OAuth row");
+	store.close();
+	await Bun.write(
+		`${agentDir}/config.yml`,
+		`providers:
+  oauthAccountLocks:
+    anthropic: ${selectedIdentityHash}
+  oauthAccountFailover: true
+`,
+	);
+
+	const stopAfterFirstRefresh = new Error("models-policy-installed-before-first-refresh");
+	let observedIdentityHash: string | undefined;
+	let observedCredentialId: number | undefined;
+	let observedAvailable: boolean | undefined;
+	let observedFailover: boolean | undefined;
+	let observedAccessToken: string | undefined;
+	const refreshSpy = vi.spyOn(ModelRegistry.prototype, "refresh").mockImplementation(async function (
+		this: ModelRegistry,
+	): Promise<void> {
+		const selection = this.authStorage.getOAuthAccountSelection("anthropic");
+		observedIdentityHash = selection?.identityHash;
+		observedCredentialId = selection?.credentialId;
+		observedAvailable = selection?.available;
+		observedFailover = selection?.allowSiblingFailover;
+		observedAccessToken = (await this.authStorage.getOAuthAccess("anthropic"))?.accessToken;
+		throw stopAfterFirstRefresh;
+	});
+
+	resetSettingsForTest();
+	setAgentDir(agentDir);
+	setProjectDir(projectDir);
+	try {
+		await expect(
+			runModelsCommand({
+				action: "ls",
+				flags: { noExtensions: true },
+			}),
+		).rejects.toBe(stopAfterFirstRefresh);
+		expect(observedIdentityHash).toBe(selectedIdentityHash);
+		expect(observedCredentialId).toBe(selectedRow.id);
+		expect(observedAvailable).toBe(true);
+		expect(observedFailover).toBe(true);
+		expect(observedAccessToken).toBe("sk-ant-oat-models-b");
+	} finally {
+		refreshSpy.mockRestore();
+		resetSettingsForTest();
+		setAgentDir(originalAgentDir);
+		setProjectDir(originalProjectDir);
 	}
 });
 

@@ -1,8 +1,8 @@
 /**
- * RPC protocol types for headless operation.
+ * Application payload types carried by the headless gRPC API.
  *
- * Commands are sent as JSON lines on stdin.
- * Responses and events are emitted as JSON lines on stdout.
+ * Transport framing metadata is represented by `@oh-my-pi/pi-grpc`; these
+ * objects retain the existing command and event shapes used by the dispatcher.
  */
 import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
@@ -24,13 +24,10 @@ import type { RpcMessagesPage } from "./rpc-messages";
 import type { RpcOpenRouterModelRouting } from "./rpc-openrouter-routing";
 
 // ============================================================================
-// RPC Commands (stdin)
+// RPC Commands
 // ============================================================================
 
 export type RpcCommand =
-	// Protocol
-	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
-
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
@@ -51,8 +48,11 @@ export type RpcCommand =
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+	| { id?: string; type: "get_oauth_accounts" }
+	| { id?: string; type: "set_oauth_account_lock"; providerId: string; credentialId?: number }
+	| { id?: string; type: "set_oauth_account_failover"; enabled: boolean }
+	| { id?: string; type: "remove_oauth_account"; providerId: string; credentialId: number }
 	| { id?: string; type: "get_file_diff"; path: string }
-
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model" }
@@ -124,6 +124,14 @@ export interface RpcSettingView {
 	options?: RpcSettingOption[];
 	apply: "immediate" | "next-session";
 }
+export interface RpcRuntimeMetrics {
+	pid: number;
+	uptimeMs: number;
+	residentMemoryBytes: number;
+	heapUsedBytes: number;
+	heapTotalBytes: number;
+	externalMemoryBytes: number;
+}
 
 export interface RpcSessionState {
 	model?: Model;
@@ -144,6 +152,7 @@ export interface RpcSessionState {
 	messageCount: number;
 	queuedMessageCount: number;
 	todoPhases: TodoPhase[];
+	runtime: RpcRuntimeMetrics;
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
@@ -169,23 +178,6 @@ export interface RpcPromptResultFrame {
 	type: "prompt_result";
 	id?: string;
 	agentInvoked: boolean;
-}
-
-export interface RpcReadyFrame {
-	type: "ready";
-	protocolVersion: 1;
-	supportedProtocolVersions: [1, 2];
-	maxFrameBytes: number;
-	maxReassembledFrameBytes: number;
-}
-
-export interface RpcChunkFrame {
-	type: "rpc_chunk";
-	chunkId: string;
-	index: number;
-	count: number;
-	byteLength: number;
-	data: string;
 }
 
 export interface RpcHandoffResult {
@@ -218,21 +210,37 @@ export interface RpcSubagentMessagesResult {
 	messages: AgentMessage[];
 }
 
+export interface RpcOAuthAccount {
+	credentialId: number;
+	email?: string;
+	accountId?: string;
+	orgId?: string;
+	orgName?: string;
+	projectId?: string;
+	active: boolean;
+	locked: boolean;
+	lockable: boolean;
+}
+
+export interface RpcOAuthProvider {
+	id: string;
+	name: string;
+	available: boolean;
+	failover: boolean;
+	lockedCredentialId?: number;
+	accounts: RpcOAuthAccount[];
+}
+
+export interface RpcOAuthAccounts {
+	providers: RpcOAuthProvider[];
+}
+
 // ============================================================================
-// RPC Responses (stdout)
+// RPC Responses
 // ============================================================================
 
 // Success responses with data
 export type RpcResponse =
-	// Protocol
-	| {
-			id?: string;
-			type: "response";
-			command: "negotiate_protocol";
-			success: true;
-			data: { protocolVersion: 2 };
-	  }
-
 	// Prompting (async - events follow)
 	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
 	| { id?: string; type: "response"; command: "steer"; success: true }
@@ -386,6 +394,18 @@ export type RpcResponse =
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
 	| { id?: string; type: "response"; command: "get_messages_page"; success: true; data: RpcMessagesPage }
+	// OAuth accounts
+	| {
+			id?: string;
+			type: "response";
+			command:
+				| "get_oauth_accounts"
+				| "set_oauth_account_lock"
+				| "set_oauth_account_failover"
+				| "remove_oauth_account";
+			success: true;
+			data: RpcOAuthAccounts;
+	  }
 
 	// Login
 	| {
@@ -402,7 +422,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };
 
 // ============================================================================
-// Subagent Events (stdout)
+// Subagent Events
 // ============================================================================
 
 export interface RpcSubagentLifecycleFrame {
@@ -425,7 +445,7 @@ export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFr
 export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
 
 // ============================================================================
-// Extension UI Events (stdout)
+// Extension UI Events
 // ============================================================================
 
 /** Emitted when an extension needs user input */
@@ -489,7 +509,7 @@ export type RpcExtensionUIRequest =
 	  };
 
 // ============================================================================
-// Host Tool Frames (bidirectional)
+// Host Tool Messages
 // ============================================================================
 
 export interface RpcHostToolDefinition {
@@ -534,7 +554,7 @@ export interface RpcHostToolResult {
 }
 
 // ============================================================================
-// Host URI Frames (bidirectional)
+// Host URI Messages
 // ============================================================================
 
 export interface RpcHostUriSchemeDefinition {
@@ -589,7 +609,7 @@ export interface RpcHostUriResult {
 }
 
 // ============================================================================
-// Extension UI Commands (stdin)
+// Extension UI Responses
 // ============================================================================
 
 /** Response to an extension UI request */

@@ -4,6 +4,7 @@ import { formatModelString, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { discoverAuthStorage } from "../sdk";
+import { installOAuthAccountSelectionFromSettings } from "../session/credential-pin";
 import { SessionManager } from "../session/session-manager";
 import { mapWithConcurrencyLimitAllSettled } from "../task/parallel";
 import { runStructuredSubagent } from "../task/structured-subagent";
@@ -48,6 +49,7 @@ export async function createCleanseAgentRuntime(options: {
 }): Promise<CleanseAgentRuntime> {
 	const cwd = options.cwd ?? getProjectDir();
 	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
+	installOAuthAccountSelectionFromSettings(settings, authStorage);
 	const modelRegistry = new ModelRegistry(authStorage);
 	await modelRegistry.refresh();
 	const resolved = resolveCliModel({ cliModel: options.model, modelRegistry, settings });

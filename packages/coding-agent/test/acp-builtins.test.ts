@@ -3,6 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type {
+	OAuthAccountIdentity,
+	OAuthAccountSelectionState,
+	OAuthAccountSummary,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
 	ResetCreditTarget,
@@ -36,6 +39,7 @@ interface FakeAcpBuiltinSession {
 	messages: unknown[];
 	settings: Settings;
 	model: { provider: string; id: string } | undefined;
+	modelRegistry: { authStorage: FakeOAuthRoutingAuthStorage };
 	newSession(opts?: { drop?: boolean; parentSession?: string }): Promise<boolean>;
 	switchSession(sessionPath: string): Promise<boolean>;
 	moveSession(newCwd: string, targetSessionDir?: string): Promise<void>;
@@ -77,9 +81,62 @@ interface FakeAcpBuiltinSessionManager {
 	setSessionName(name: string, source: string): Promise<boolean>;
 }
 
+interface FakeOAuthRoutingAuthStorage {
+	selections: Map<string, OAuthAccountSelectionState>;
+	accounts: Map<string, OAuthAccountSummary[]>;
+	identities: Map<string, OAuthAccountIdentity>;
+	selectionCalls: string[];
+	storedCalls: Array<[provider: string, sessionId: string | undefined]>;
+	identityCalls: Array<[provider: string, sessionId: string | undefined]>;
+	getOAuthAccountSelection(provider: string): OAuthAccountSelectionState | undefined;
+	listStoredOAuthAccounts(provider: string, sessionId?: string): OAuthAccountSummary[];
+	getOAuthAccountIdentity(provider: string, sessionId?: string): OAuthAccountIdentity | undefined;
+}
+
+function oauthUsageReport(
+	provider: string,
+	email: string,
+	accountId: string,
+	organization?: { orgId: string; orgName: string },
+): UsageReport {
+	return {
+		provider,
+		fetchedAt: Date.now(),
+		limits: [
+			{
+				id: `${provider}:${accountId}`,
+				label: "Quota",
+				scope: { provider, accountId },
+				amount: { used: 25, usedFraction: 0.25, unit: "percent" },
+			},
+		],
+		metadata: { email, accountId, ...organization },
+	};
+}
+
 function createRuntime() {
 	const settings = Settings.isolated();
 	const output: string[] = [];
+	const oauthRoutingAuthStorage: FakeOAuthRoutingAuthStorage = {
+		selections: new Map(),
+		accounts: new Map(),
+		identities: new Map(),
+		selectionCalls: [],
+		storedCalls: [],
+		identityCalls: [],
+		getOAuthAccountSelection(provider) {
+			this.selectionCalls.push(provider);
+			return this.selections.get(provider);
+		},
+		listStoredOAuthAccounts(provider, sessionId) {
+			this.storedCalls.push([provider, sessionId]);
+			return this.accounts.get(provider) ?? [];
+		},
+		getOAuthAccountIdentity(provider, sessionId) {
+			this.identityCalls.push([provider, sessionId]);
+			return this.identities.get(provider);
+		},
+	};
 	let fakeSessionManager: FakeAcpBuiltinSessionManager | undefined;
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
@@ -151,6 +208,7 @@ function createRuntime() {
 		getLastAssistantText: () => undefined,
 		messages: [],
 		model: undefined,
+		modelRegistry: { authStorage: oauthRoutingAuthStorage },
 		settings,
 		getToolByName: (_name: string) => undefined,
 		async compact(_args?: string) {},
@@ -215,6 +273,7 @@ function createRuntime() {
 	return {
 		output,
 		session,
+		oauthRoutingAuthStorage,
 		fakeSessionManager,
 		runtime: {
 			session: typedSession,
@@ -278,6 +337,178 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("5 hours (prolite)");
 		expect(output[0]).toContain("user@example.com: 0.24 unknown used (76.0% left)");
 		expect(output[0]).toContain("resets in");
+	});
+
+	it("renders a strict org-qualified lock and marks only the account that served", async () => {
+		const { oauthRoutingAuthStorage, output, runtime } = createRuntime();
+		oauthRoutingAuthStorage.selections.set("anthropic", {
+			identityHash: "a".repeat(64),
+			credentialId: 11,
+			available: true,
+			allowSiblingFailover: false,
+		});
+		oauthRoutingAuthStorage.accounts.set("anthropic", [
+			{
+				position: 0,
+				credentialId: 11,
+				email: "locked@example.test",
+				accountId: "locked-account",
+				orgId: "org-a",
+				orgName: "Team Alpha",
+				active: true,
+			},
+			{
+				position: 1,
+				credentialId: 12,
+				email: "sibling@example.test",
+				accountId: "sibling-account",
+				orgId: "org-b",
+				orgName: "Team Beta",
+				active: false,
+			},
+		]);
+		oauthRoutingAuthStorage.identities.set("anthropic", {
+			email: "locked@example.test",
+			accountId: "locked-account",
+			orgId: "org-a",
+			orgName: "Team Alpha",
+		});
+		runtime.session.fetchUsageReports = async () => [
+			oauthUsageReport("anthropic", "locked@example.test", "locked-account", {
+				orgId: "org-a",
+				orgName: "Team Alpha",
+			}),
+			oauthUsageReport("anthropic", "sibling@example.test", "sibling-account", {
+				orgId: "org-b",
+				orgName: "Team Beta",
+			}),
+		];
+
+		await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		const rendered = output[0]!;
+		expect(rendered).toContain("Anthropic\n  Locked account: locked@example.test (Team Alpha) (strict)");
+		expect(rendered).toContain(
+			"locked@example.test (Team Alpha): 25.00% used (75.0% left)  ← in use by this session",
+		);
+		expect(rendered).not.toContain(
+			"sibling@example.test (Team Beta): 25.00% used (75.0% left)  ← in use by this session",
+		);
+		expect(rendered.split("← in use by this session")).toHaveLength(2);
+	});
+
+	it("labels only the serving sibling as failover when a locked account differs", async () => {
+		const { oauthRoutingAuthStorage, output, runtime } = createRuntime();
+		oauthRoutingAuthStorage.selections.set("anthropic", {
+			identityHash: "b".repeat(64),
+			credentialId: 21,
+			available: true,
+			allowSiblingFailover: true,
+		});
+		oauthRoutingAuthStorage.accounts.set("anthropic", [
+			{
+				position: 0,
+				credentialId: 21,
+				email: "locked@example.test",
+				accountId: "locked-account",
+				active: false,
+			},
+			{
+				position: 1,
+				credentialId: 22,
+				email: "serving@example.test",
+				accountId: "serving-account",
+				active: true,
+			},
+		]);
+		oauthRoutingAuthStorage.identities.set("anthropic", {
+			email: "serving@example.test",
+			accountId: "serving-account",
+		});
+		runtime.session.fetchUsageReports = async () => [
+			oauthUsageReport("anthropic", "locked@example.test", "locked-account"),
+			oauthUsageReport("anthropic", "serving@example.test", "serving-account"),
+		];
+
+		await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		const rendered = output[0]!;
+		expect(rendered).toContain("Locked account: locked@example.test (failover enabled)");
+		expect(rendered).toContain("serving@example.test: 25.00% used (75.0% left)  ← in use by this session (failover)");
+		expect(rendered).not.toContain("locked@example.test: 25.00% used (75.0% left)  ← in use by this session");
+		expect(rendered.split("← in use by this session")).toHaveLength(2);
+	});
+
+	it("renders stale lock intent without attributing an unserved report", async () => {
+		const { oauthRoutingAuthStorage, output, runtime } = createRuntime();
+		oauthRoutingAuthStorage.selections.set("openai-codex", {
+			identityHash: "c".repeat(64),
+			credentialId: undefined,
+			available: false,
+			allowSiblingFailover: false,
+		});
+		runtime.session.fetchUsageReports = async () => [
+			oauthUsageReport("openai-codex", "available@example.test", "available-account"),
+		];
+
+		await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		expect(output[0]).toContain("Locked account unavailable; choose another in /settings");
+		expect(output[0]).not.toContain("← in use by this session");
+	});
+
+	it("keeps automatic routing unlabelled and resolves every provider with one captured session id", async () => {
+		const { oauthRoutingAuthStorage, output, runtime } = createRuntime();
+		oauthRoutingAuthStorage.accounts.set("anthropic", [
+			{
+				position: 0,
+				credentialId: 31,
+				email: "anthropic@example.test",
+				accountId: "anthropic-account",
+				active: true,
+			},
+		]);
+		oauthRoutingAuthStorage.accounts.set("openai-codex", [
+			{
+				position: 0,
+				credentialId: 41,
+				email: "codex@example.test",
+				accountId: "codex-account",
+				active: true,
+			},
+		]);
+		oauthRoutingAuthStorage.identities.set("anthropic", {
+			email: "anthropic@example.test",
+			accountId: "anthropic-account",
+		});
+		oauthRoutingAuthStorage.identities.set("openai-codex", {
+			email: "codex@example.test",
+			accountId: "codex-account",
+		});
+		runtime.session.fetchUsageReports = async () => {
+			runtime.session.sessionId = "replacement-session-id";
+			return [
+				oauthUsageReport("openai-codex", "codex@example.test", "codex-account"),
+				oauthUsageReport("anthropic", "anthropic@example.test", "anthropic-account"),
+			];
+		};
+
+		await executeAcpBuiltinSlashCommand("/usage", runtime);
+
+		const rendered = output[0]!;
+		expect(rendered).not.toContain("Locked account:");
+		expect(rendered).not.toContain("Locked account unavailable");
+		expect(rendered).not.toContain("(failover)");
+		expect(rendered.split("← in use by this session")).toHaveLength(3);
+		expect(oauthRoutingAuthStorage.selectionCalls).toEqual(["anthropic", "openai-codex"]);
+		expect(oauthRoutingAuthStorage.storedCalls).toEqual([
+			["anthropic", "fake-session-id"],
+			["openai-codex", "fake-session-id"],
+		]);
+		expect(oauthRoutingAuthStorage.identityCalls).toEqual([
+			["anthropic", "fake-session-id"],
+			["openai-codex", "fake-session-id"],
+		]);
 	});
 
 	it("suppresses redundant usage window suffixes while retaining legitimate ones", async () => {

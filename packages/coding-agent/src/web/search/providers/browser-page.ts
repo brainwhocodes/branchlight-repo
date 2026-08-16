@@ -1,10 +1,38 @@
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { untilAborted } from "@oh-my-pi/pi-utils";
-import type { Page } from "puppeteer-core";
-import { applyStealthPatches, applyViewport } from "../../../tools/browser/launch";
+import type { Browser, Page } from "playwright-core";
+import { applyStealthPatches, applyViewport, BROWSER_PROTOCOL_TIMEOUT_MS } from "../../../tools/browser/launch";
 import { acquireBrowser, holdBrowser, releaseBrowser } from "../../../tools/browser/registry";
+import { connectOverCdp } from "../../../tools/browser/tab-worker";
 import { buildBrowserNavigationHeaders } from "./browser-headers";
 import { SEARCH_HARD_TIMEOUT_MS } from "./utils";
+
+const browserConnections = new Map<string, Promise<Browser>>();
+
+/**
+ * Playwright intentionally has no public disconnect API. Keep one CDP
+ * connection per registry endpoint and let a shared browser's disconnect event
+ * retire it; calling Browser.close() here could terminate a broker-owned or
+ * otherwise attached browser.
+ */
+function connectBrowser(cdpEndpoint: string): Promise<Browser> {
+	const existing = browserConnections.get(cdpEndpoint);
+	if (existing) return existing;
+
+	const pending = connectOverCdp(cdpEndpoint, BROWSER_PROTOCOL_TIMEOUT_MS);
+	browserConnections.set(cdpEndpoint, pending);
+	void pending.then(
+		browser => {
+			browser.once("disconnected", () => {
+				if (browserConnections.get(cdpEndpoint) === pending) browserConnections.delete(cdpEndpoint);
+			});
+		},
+		() => {
+			if (browserConnections.get(cdpEndpoint) === pending) browserConnections.delete(cdpEndpoint);
+		},
+	);
+	return pending;
+}
 
 /** HTML plus the response status and final URL after redirects or browser navigation. */
 export interface LoadedHtmlPage {
@@ -64,18 +92,21 @@ async function browseHtmlPage(
 			},
 		),
 	);
-	if (!("browser" in handle)) {
+	if (!("cdpEndpoint" in handle)) {
 		await releaseBrowser(handle, { kill: false });
-		throw new Error("Headless browser acquisition returned a non-Puppeteer browser");
+		throw new Error("Headless browser acquisition returned a non-CDP browser");
 	}
 
 	holdBrowser(handle);
 	let page: Page | undefined;
 	try {
-		const activePage = await untilAborted(signal, () => handle.browser.newPage());
+		const browser = await untilAborted(signal, () => connectBrowser(handle.cdpEndpoint));
+		const context = browser.contexts()[0];
+		if (!context) throw new Error("Headless browser CDP endpoint has no default context");
+		const activePage = await untilAborted(signal, () => context.newPage());
 		page = activePage;
 		await applyViewport(activePage);
-		await applyStealthPatches(handle.browser, activePage, handle.stealth);
+		await applyStealthPatches(browser, activePage);
 		if (homeUrl) {
 			await untilAborted(signal, () =>
 				activePage.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs }),
@@ -90,7 +121,9 @@ async function browseHtmlPage(
 			if (options.afterNavigation) await options.afterNavigation(activePage, signal);
 			if (ready) {
 				await untilAborted(signal, () =>
-					activePage.waitForSelector(ready.selector, { timeout: ready.timeoutMs }).catch(() => null),
+					activePage
+						.waitForSelector(ready.selector, { state: "attached", timeout: ready.timeoutMs })
+						.catch(() => null),
 				);
 			}
 			const loaded = {

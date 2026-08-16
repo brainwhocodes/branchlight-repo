@@ -10,6 +10,7 @@ import type { CommitCommandArgs, ConventionalAnalysis, NumstatEntry } from "../.
 import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { discoverAuthStorage, discoverContextFiles, loadCliExtensionProviders } from "../../sdk";
+import { installOAuthAccountSelectionFromSettings } from "../../session/credential-pin";
 import * as git from "../../utils/git";
 import { abortOnGitFailure, pushOrAbort } from "../execute";
 import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
@@ -31,6 +32,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<{ usedF
 	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
 
 	process.stdout.write("● Resolving model...\n");
+	installOAuthAccountSelectionFromSettings(settings, authStorage);
 	const modelRegistry = new ModelRegistry(authStorage);
 	await modelRegistry.refresh();
 	await loadCliExtensionProviders(modelRegistry, settings, cwd);

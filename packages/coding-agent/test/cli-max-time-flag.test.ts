@@ -1,12 +1,34 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { credentialPinHash } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { runCli } from "../src/cli";
+
+function startupOAuthCredential(suffix: string) {
+	return {
+		type: "oauth" as const,
+		access: `access-${suffix}`,
+		refresh: `refresh-${suffix}`,
+		expires: Date.now() + 60_000,
+		accountId: `account-${suffix}`,
+		email: `${suffix}@example.com`,
+	};
+}
+
+function startupAccountHash(suffix: string): string {
+	const hash = credentialPinHash("anthropic", {
+		accountId: `account-${suffix}`,
+		email: `${suffix}@example.com`,
+	});
+	if (!hash) throw new Error(`Expected a persistent hash for ${suffix}`);
+	return hash;
+}
 
 describe("parseArgs — --max-time flag", () => {
 	it("parses --max-time seconds as maxTime", () => {
@@ -111,5 +133,74 @@ describe("parseArgs — --max-time flag", () => {
 
 		expect(observedOptions?.deadline).toBeGreaterThanOrEqual(beforeRun + 3_000);
 		expect(observedOptions?.deadline).toBeLessThanOrEqual(afterRun + 3_000);
+	});
+
+	it("installs the persisted lock before the first model availability lookup across startup modes", async () => {
+		using tempDir = TempDir.createSync("@omp-startup-account-policy-");
+		const previousNoTitle = process.env.PI_NO_TITLE;
+		const cases = [
+			{ name: "interactive", rawArgs: [] },
+			{ name: "print", rawArgs: ["--print", "hello"] },
+			{ name: "ACP", rawArgs: ["--mode", "acp"] },
+		] as const;
+
+		try {
+			for (const testCase of cases) {
+				const authStorage = await AuthStorage.create(path.join(tempDir.path(), `${testCase.name}-auth.db`));
+				await authStorage.set("anthropic", [
+					startupOAuthCredential(`${testCase.name}-a`),
+					startupOAuthCredential(`${testCase.name}-b`),
+				]);
+				const selectedSuffix = `${testCase.name}-b`;
+				const identityHash = startupAccountHash(selectedSuffix);
+				const selectedAccount = authStorage
+					.listStoredOAuthAccounts("anthropic")
+					.find(account => account.accountId === `account-${selectedSuffix}`);
+				const settings = Settings.isolated({
+					"marketplace.autoUpdate": "off",
+					enabledModels: ["anthropic/*"],
+					"providers.oauthAccountLocks": { anthropic: identityHash },
+					"providers.oauthAccountFailover": true,
+				});
+				const parsed = parseArgs([...testCase.rawArgs]);
+				parsed.noExtensions = true;
+				parsed.noSkills = true;
+				parsed.noRules = true;
+				parsed.noTools = true;
+				parsed.noLsp = true;
+				parsed.sessionDir = tempDir.path();
+				const stopAtAvailability = new Error(`stop at ${testCase.name} availability`);
+				const availabilitySpy = vi.spyOn(ModelRegistry.prototype, "getAvailable").mockImplementation(function (
+					this: ModelRegistry,
+				) {
+					expect(this.authStorage).toBe(authStorage);
+					expect(authStorage.getOAuthAccountSelection("anthropic")).toEqual({
+						identityHash,
+						credentialId: selectedAccount?.credentialId,
+						available: true,
+						allowSiblingFailover: true,
+					});
+					throw stopAtAvailability;
+				});
+
+				try {
+					await expect(
+						runRootCommand(parsed, [...testCase.rawArgs], {
+							discoverAuthStorage: async () => authStorage,
+							settings,
+							createAgentSession: async () => {
+								throw new Error("Session creation reached before availability sentinel");
+							},
+						}),
+					).rejects.toBe(stopAtAvailability);
+				} finally {
+					availabilitySpy.mockRestore();
+					authStorage.close();
+				}
+			}
+		} finally {
+			if (previousNoTitle === undefined) delete process.env.PI_NO_TITLE;
+			else process.env.PI_NO_TITLE = previousNoTitle;
+		}
 	});
 });

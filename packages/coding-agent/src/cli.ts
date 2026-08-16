@@ -27,20 +27,16 @@ import {
 import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
-import { DESKTOP_TERMINAL_WORKER_ARG } from "@oh-my-pi/pi-wire";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import { launchWorkspaceFromCurrentRepo } from "./desktop-terminal/launcher";
-import { smokeTestDesktopTerminalWorker } from "./desktop-terminal/smoke";
-import { startDesktopTerminalWorker } from "./desktop-terminal/worker";
+import { smokeTestRuntimeServer, startRuntimeServerFromEnvironment } from "./desktop-terminal/runtime-server-entry";
 import { startJsEvalProcess } from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
-import { smokeTestComputerWorker } from "./tools/computer/supervisor";
-import { startComputerWorker } from "./tools/computer/worker-entry";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -96,6 +92,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestTtsWorker } = await import("./tts/tts-client");
 	const { smokeTestMnemopiEmbedWorker } = await import("./mnemopi/embed-client");
 	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
+	const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { smokeTestDaemonBroker } = await import("./launch/client");
 	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
@@ -122,8 +119,8 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestMnemopiEmbedWorker();
 	await smokeTestDaemonBroker();
 	await smokeTestLspMux();
-	await smokeTestDesktopTerminalWorker();
 	await smokeTestTerminalOutputWorker();
+	await smokeTestRuntimeServer();
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -135,7 +132,7 @@ const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
 const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
-
+const RUNTIME_SERVER_WORKER_ARG = "__omp_worker_runtime_server";
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TINY_WORKER_ARG) {
 		await runTinyWorker();
@@ -175,6 +172,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	}
 	if (arg === COMPUTER_WORKER_ARG) {
 		if (parentPort) installWorkerInbox(parentPort);
+		const { startComputerWorker } = await import("./tools/computer/worker-entry");
 		startComputerWorker();
 		return true;
 	}
@@ -210,10 +208,6 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
 		return true;
 	}
-	if (arg === DESKTOP_TERMINAL_WORKER_ARG) {
-		await startDesktopTerminalWorker();
-		return true;
-	}
 	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {
 		if (parentPort) installWorkerInbox(parentPort);
 		// This selector is the isolation boundary; a static import would evaluate xterm in normal CLI startup.
@@ -229,6 +223,10 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === LSP_MUX_WORKER_ARG) {
 		const { startLspMuxFromEnvironment } = await import("./lsp/mux/server");
 		await startLspMuxFromEnvironment();
+		return true;
+	}
+	if (arg === RUNTIME_SERVER_WORKER_ARG) {
+		await startRuntimeServerFromEnvironment();
 		return true;
 	}
 	return false;
@@ -401,7 +399,6 @@ export async function runCli(argv: string[]): Promise<void> {
 	// poison `workerHostEntry()` for the whole test process, forcing eval/stats/
 	// browser workers onto the same-realm inline fallback.
 	if (isProcessEntry) declareWorkerHostEntry();
-
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();
 		return;

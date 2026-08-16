@@ -46,6 +46,11 @@ import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
+import {
+	buildOAuthAccountRoutingDisplay,
+	formatOAuthAccountSelectionLine,
+	type OAuthAccountRoutingDisplayResolver,
+} from "../../slash-commands/helpers/oauth-account-routing-display";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
@@ -542,20 +547,15 @@ export class CommandController {
 		}
 
 		const availableWidth = Math.max(40, (this.ctx.ui.terminal.columns ?? 100) - 2);
-		const currentProvider = this.ctx.session.model?.provider;
-		const activeAccount = currentProvider
-			? this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-					currentProvider,
-					this.ctx.session.sessionId,
-				)
-			: undefined;
+		const sessionId = this.ctx.session.sessionId;
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
 		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(usageReports);
 		const output = renderUsageReports(
 			usageReports,
 			theme,
 			Date.now(),
 			availableWidth,
-			provider => (provider === currentProvider ? activeAccount : undefined),
+			provider => buildOAuthAccountRoutingDisplay(authStorage, provider, sessionId),
 			usageModelSelectors,
 		);
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(output, 1, 0)]);
@@ -1828,7 +1828,7 @@ export function renderUsageReports(
 	uiTheme: typeof theme,
 	nowMs: number,
 	availableWidth: number,
-	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
+	resolveRoutingDisplay?: OAuthAccountRoutingDisplayResolver,
 	usageModelSelectors: readonly string[] = [],
 ): string {
 	const lines: string[] = [];
@@ -1855,7 +1855,8 @@ export function renderUsageReports(
 	for (const { provider, providerReports } of providerEntries) {
 		lines.push("");
 		const providerName = formatProviderName(provider);
-		const activeAccount = resolveActiveAccount?.(provider);
+		const routingDisplay = resolveRoutingDisplay?.(provider);
+		const activeAccount = routingDisplay?.actualAccount;
 
 		const limitGroups = new Map<
 			string,
@@ -1879,9 +1880,14 @@ export function renderUsageReports(
 		}
 
 		lines.push(uiTheme.bold(uiTheme.fg("accent", providerName)));
+		const selectionLine = routingDisplay ? formatOAuthAccountSelectionLine(routingDisplay) : undefined;
+		if (selectionLine) lines.push(truncateToWidth(`  ${selectionLine}`, availableWidth));
 		const activeAccountLabel = formatActiveAccountLabel(activeAccount);
 		if (activeAccountLabel) {
-			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
+			const activePrefix = routingDisplay?.actualAccountIsFailover
+				? "in use by this session (failover):"
+				: "in use by this session:";
+			lines.push(truncateToWidth(`  ${uiTheme.fg("accent", activePrefix)} ${activeAccountLabel}`, availableWidth));
 		}
 		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
 		if (reportingModels.length > 0) {
@@ -1960,6 +1966,7 @@ export function renderUsageReports(
 			accountRank.set(report, -worst * 1000 + position);
 		});
 
+		const automaticRouting = routingDisplay?.automaticRouting ?? true;
 		const renderableGroups = Array.from(limitGroups.values()).map(group => {
 			const entries = group.limits.map((limit, index) => ({
 				limit,
@@ -1974,7 +1981,13 @@ export function renderUsageReports(
 			});
 			const sortedLimits = entries.map(entry => entry.limit);
 			const sortedReports = entries.map(entry => entry.report);
-			return { group, sortedLimits, sortedReports, amountText: formatAggregateAmount(sortedLimits) };
+			const amountText = automaticRouting ? formatAggregateAmount(sortedLimits) : "";
+			const accountAmountTexts = automaticRouting
+				? []
+				: sortedLimits.map(limit =>
+						resolveUsedFraction(limit) === undefined ? "" : formatAggregateAmount([limit]),
+					);
+			return { group, sortedLimits, sortedReports, amountText, accountAmountTexts };
 		});
 
 		const sectionCount = renderableGroups.reduce((max, g) => Math.max(max, g.sortedLimits.length), 0);
@@ -1982,7 +1995,7 @@ export function renderUsageReports(
 		const sectionColumnWidth = resolveColumnWidth(sectionCount, availableWidth, sectionTrailing);
 		const sectionBarWidth = Math.min(sectionColumnWidth, BAR_WIDTH_MAX);
 
-		for (const { group, sortedLimits, sortedReports, amountText } of renderableGroups) {
+		for (const { group, sortedLimits, sortedReports, amountText, accountAmountTexts } of renderableGroups) {
 			const status = resolveAggregateStatus(sortedLimits);
 			const statusIcon = resolveStatusIcon(status, uiTheme);
 
@@ -2001,6 +2014,12 @@ export function renderUsageReports(
 				padColumn(renderUsageBar(limit, uiTheme, sectionBarWidth), sectionColumnWidth),
 			);
 			lines.push(`  ${bars.join(" ")} ${amountText}`.trimEnd());
+			if (accountAmountTexts.some(Boolean)) {
+				const valueCells = accountAmountTexts.map(value =>
+					padColumn(truncateToWidth(value, sectionColumnWidth), sectionColumnWidth),
+				);
+				lines.push(`  ${valueCells.join(" ")}`.trimEnd());
+			}
 			const resetText = sortedLimits.length <= 1 ? resolveResetRange(sortedLimits, nowMs) : null;
 			if (resetText) {
 				lines.push(`  ${uiTheme.fg("dim", resetText)}`.trimEnd());

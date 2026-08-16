@@ -5,6 +5,7 @@ import { getProjectDir, logger, prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
+import { installOAuthAccountSelectionFromSettings } from "../session/credential-pin";
 import { loadProjectContextFiles } from "../system-prompt";
 import * as git from "../utils/git";
 import { runAgenticCommit } from "./agentic";
@@ -49,6 +50,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	const settings = await Settings.init({ cwd });
 	const commitSettings = settings.getGroup("commit");
 	const authStorage = await discoverAuthStorage();
+	installOAuthAccountSelectionFromSettings(settings, authStorage);
 	const modelRegistry = new ModelRegistry(authStorage);
 	await modelRegistry.refresh();
 	await loadCliExtensionProviders(modelRegistry, settings, cwd);

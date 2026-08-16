@@ -43,6 +43,7 @@ import {
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
+import { createBranchlightLifecycleExtension } from "./desktop-terminal/runtime-attach";
 import { initializeWithSettings } from "./discovery";
 import {
 	clearPluginRootsAndCaches,
@@ -60,7 +61,7 @@ import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
-import { claimRpcInput } from "./modes/rpc/rpc-input";
+import { runRpcMode } from "./modes/rpc/rpc-mode";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
@@ -75,6 +76,7 @@ import {
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
 import type { AuthStorage } from "./session/auth-storage";
+import { installOAuthAccountSelectionFromSettings } from "./session/credential-pin";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
 	createForeignSessionStore,
@@ -98,12 +100,6 @@ import { withTimeoutSignal } from "./utils/fetch-timeout";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
-type RunRpcMode = (
-	session: AgentSession,
-	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
-	eventBus?: EventBus,
-	input?: ReadableStream<Uint8Array>,
-) => Promise<never>;
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
@@ -662,6 +658,7 @@ async function moveMissingCwdSessionIfNeeded(
 async function switchToResumedProject(
 	resumedCwd: string | undefined,
 	activeSettings: Settings,
+	authStorage: AuthStorage,
 	pluginPreloadPromise: Promise<unknown>,
 ): Promise<string> {
 	if (
@@ -683,6 +680,7 @@ async function switchToResumedProject(
 	// read the launch project's stale/empty roots during session creation.
 	await preloadPluginRoots(os.homedir(), cwd);
 	await activeSettings.reloadForCwd(cwd);
+	installOAuthAccountSelectionFromSettings(activeSettings, authStorage);
 	return cwd;
 }
 
@@ -896,6 +894,8 @@ export async function buildSessionOptions(
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
+	const branchlightLifecycleExtension = createBranchlightLifecycleExtension();
+	if (branchlightLifecycleExtension) options.extensions = [branchlightLifecycleExtension];
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
 	if (parsed.serviceTier !== undefined) {
 		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
@@ -1234,9 +1234,6 @@ export async function runRootCommand(
 		process.exit(1);
 	}
 	const mode = parsedArgs.mode || "text";
-	// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
-	const rpcInput = mode === "rpc" || mode === "rpc-ui" ? claimRpcInput() : undefined;
-
 	// Kick off plugin-root preload in parallel with the remaining startup work.
 	// Awaited later (before extension/skill discovery in createAgentSession needs it).
 	const home = os.homedir();
@@ -1268,7 +1265,7 @@ export async function runRootCommand(
 	// session-critical database connection picks the right busy timeout.
 	// See getDbBusyTimeoutMs().
 	const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
-	// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
+	// Protocol modes receive requests through their own transports, never prompt text.
 	const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
 	const autoPrint = pipedInput !== undefined && !parsedArgs.print && parsedArgs.mode === undefined;
 	const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
@@ -1276,12 +1273,13 @@ export async function runRootCommand(
 	// tree; declare it so headless subagent optimizations (e.g. skipping replan
 	// title refresh) can tell a focusable process from a print/RPC/eval one.
 	setInteractiveHost(isInteractive);
-	// Create AuthStorage and ModelRegistry upfront
+	// Resolve the authoritative AuthStorage and effective Settings before ModelRegistry
+	// construction so its first auth/model lookup observes the persisted routing policy.
 	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
-	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
-
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
+	installOAuthAccountSelectionFromSettings(settingsInstance, authStorage);
+	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
 	if (parsedArgs.approvalMode) {
 		// Runtime override (not persisted): every settings.get("tools.approvalMode") downstream
 		// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
@@ -1441,7 +1439,7 @@ export async function runRootCommand(
 
 	if ((typeof parsedArgs.resume === "string" || foreignSource) && sessionManager) {
 		const previousCwd = cwd;
-		cwd = await switchToResumedProject(sessionManager.getCwd(), settingsInstance, pluginPreloadPromise);
+		cwd = await switchToResumedProject(sessionManager.getCwd(), settingsInstance, authStorage, pluginPreloadPromise);
 		if (cwd !== previousCwd) {
 			// applyStartupCwd persists an explicit --cwd in parsedArgs; once resume
 			// switches projects, keep session construction on the destination too.
@@ -1497,7 +1495,7 @@ export async function runRootCommand(
 		}
 		// Re-scope every cwd-derived input before building the resumed session.
 		const previousCwd = cwd;
-		cwd = await switchToResumedProject(selected.cwd, settingsInstance, pluginPreloadPromise);
+		cwd = await switchToResumedProject(selected.cwd, settingsInstance, authStorage, pluginPreloadPromise);
 		if (cwd !== previousCwd) {
 			parsedArgs.cwd = cwd;
 			scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
@@ -1727,10 +1725,8 @@ export async function runRootCommand(
 		}
 
 		if (mode === "rpc" || mode === "rpc-ui") {
-			// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
-			const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 			stopStartupWatchdog();
-			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
+			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 			const startupChangelog = await startupChangelogPromise;

@@ -1,7 +1,9 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import * as cleanseAgent from "@oh-my-pi/pi-coding-agent/cleanse/agent";
 import { balanceDiagnostics } from "@oh-my-pi/pi-coding-agent/cleanse/balance";
 import * as cleanseCheckers from "@oh-my-pi/pi-coding-agent/cleanse/checkers";
@@ -15,6 +17,10 @@ import type {
 	CleanseDiagnosticReport,
 } from "@oh-my-pi/pi-coding-agent/cleanse/types";
 import { resolveCliArgv } from "@oh-my-pi/pi-coding-agent/cli-commands";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import { credentialPinHash } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -125,6 +131,70 @@ describe("cleanse diagnostics", () => {
 			expect(suite.checkCount).toBe(0);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("cleanse agent startup", () => {
+	test("installs a persisted account lock before the default registry's first refresh", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		store.saveOAuth("anthropic", {
+			access: "cleanse-access-a",
+			refresh: "cleanse-refresh-a",
+			expires: Date.now() + 3_600_000,
+			accountId: "cleanse-account-a",
+			email: "cleanse-a@example.com",
+		});
+		store.saveOAuth("anthropic", {
+			access: "cleanse-access-b",
+			refresh: "cleanse-refresh-b",
+			expires: Date.now() + 3_600_000,
+			accountId: "cleanse-account-b",
+			email: "cleanse-b@example.com",
+		});
+		const authStorage = new AuthStorage(store);
+		await authStorage.reload();
+		const identityHash = credentialPinHash("anthropic", {
+			accountId: "cleanse-account-b",
+			email: "cleanse-b@example.com",
+		});
+		if (!identityHash) throw new Error("Expected cleanse account B to have a durable identity");
+		const selectedAccount = authStorage
+			.listStoredOAuthAccounts("anthropic")
+			.find(account => account.accountId === "cleanse-account-b");
+		if (!selectedAccount) throw new Error("Expected cleanse account B to be stored");
+		const settings = Settings.isolated({
+			"providers.oauthAccountLocks": { anthropic: identityHash },
+			"providers.oauthAccountFailover": true,
+		});
+		vi.spyOn(Settings, "init").mockResolvedValue(settings);
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		const stop = new Error("stop cleanse startup after account-policy refresh");
+		const refreshSpy = vi.spyOn(ModelRegistry.prototype, "refresh").mockImplementation(async () => {
+			expect(authStorage.getOAuthAccountSelection("anthropic")).toEqual({
+				identityHash,
+				credentialId: selectedAccount.credentialId,
+				available: true,
+				allowSiblingFailover: true,
+			});
+			const access = await authStorage.getOAuthAccess("anthropic", "cleanse-startup-test");
+			expect(access).toMatchObject({
+				accessToken: "cleanse-access-b",
+				credentialId: selectedAccount.credentialId,
+			});
+			throw stop;
+		});
+
+		try {
+			await expect(
+				cleanseAgent.createCleanseAgentRuntime({
+					cwd: "/cleanse-policy-test",
+					model: "anthropic/test",
+				}),
+			).rejects.toBe(stop);
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			await authStorage.close();
 		}
 	});
 });

@@ -2,7 +2,18 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getGlobalDaemonRuntimeDir, isEexist, isEisdir, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
+import {
+	encodeLocalJsonlFrame,
+	ensureSecureRuntimeRoot,
+	getGlobalDaemonRuntimeDir,
+	isEisdir,
+	isEnoent,
+	LocalJsonlDecoder,
+	logger,
+	postmortem,
+	readControlToken,
+	rotateControlToken,
+} from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
@@ -75,32 +86,23 @@ async function canonicalProjectDir(projectDir: string): Promise<string> {
 }
 
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
-	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-	const tokenPath = path.join(runtimeDir, TOKEN_FILE);
-	const tokenFile = Bun.file(tokenPath);
-	for (let attempt = 0; attempt < 100; attempt++) {
-		try {
-			const token = (await tokenFile.text()).trim();
-			if (token.length > 0) return token;
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
-
-		try {
-			const handle = await fs.open(tokenPath, "wx", 0o600);
-			try {
-				const token = crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", "");
-				await handle.writeFile(token, "utf8");
-				return token;
-			} finally {
-				await handle.close();
-			}
-		} catch (error) {
-			if (!isEexist(error)) throw error;
-		}
-		await Bun.sleep(10);
+	let stat: { isSymbolicLink(): boolean; isDirectory(): boolean };
+	try {
+		stat = await fs.lstat(runtimeDir);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		stat = await fs.lstat(runtimeDir);
 	}
-	throw new Error(`Timed out initializing daemon broker token in ${runtimeDir}`);
+	if (!stat.isSymbolicLink() && stat.isDirectory()) await fs.chmod(runtimeDir, 0o700);
+	await ensureSecureRuntimeRoot(runtimeDir);
+	try {
+		return await readControlToken(runtimeDir, TOKEN_FILE);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		await rotateControlToken(runtimeDir, TOKEN_FILE);
+		return readControlToken(runtimeDir, TOKEN_FILE);
+	}
 }
 
 function requestTimeoutMs(operation: DaemonOperation): number {
@@ -147,9 +149,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #runtimeDir: string;
 	readonly #endpoint: string;
 	readonly #token: string;
-	readonly #seenCompletionIds = new Set<string>();
 	readonly #idleGraceMs: number | undefined;
-	readonly #pending = new Map<string, PendingRequest>();
+	readonly #seenCompletionIds = new Set<string>();
 	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => Promise<void> | void>();
 	readonly #completionUnsubscribes = new Set<string>();
 	readonly #preservedCompletionOwners = new Set<string>();
@@ -158,7 +159,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #completionSubscriptionId = crypto.randomUUID();
 	#socket: net.Socket | undefined;
 	#connectPromise: Promise<void> | undefined;
-	#buffer = "";
+	#decoder = new LocalJsonlDecoder();
+	readonly #pending = new Map<string, PendingRequest>();
 	#closed = false;
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
 
@@ -200,7 +202,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 		this.#pending.set(id, pending);
 		socket.write(
-			`${JSON.stringify({
+			encodeLocalJsonlFrame({
 				id,
 				token: this.#token,
 				owners: [...this.#completionSinks.keys()],
@@ -210,7 +212,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionReplays,
 				completionSubscriptionId: this.#completionSubscriptionId,
 				operation,
-			})}\n`,
+			}),
 		);
 		const result = await promise;
 		for (const owner of completionUnsubscribes) {
@@ -335,7 +337,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	#bindSocket(socket: net.Socket): void {
 		this.#socket = socket;
-		this.#buffer = "";
+		this.#decoder = new LocalJsonlDecoder();
 		socket.setEncoding("utf8");
 		socket.on("data", chunk => this.#onData(chunk));
 		socket.on("error", () => {
@@ -349,20 +351,15 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	#onData(chunk: string | Buffer): void {
-		this.#buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
-		for (;;) {
-			const newline = this.#buffer.indexOf("\n");
-			if (newline < 0) return;
-			const line = this.#buffer.slice(0, newline);
-			this.#buffer = this.#buffer.slice(newline + 1);
-			if (line.length === 0) continue;
-			let decoded: unknown;
-			try {
-				decoded = JSON.parse(line);
-			} catch (error) {
-				this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
-				continue;
-			}
+		let decodedFrames: unknown[];
+		try {
+			decodedFrames = this.#decoder.push(chunk);
+		} catch (error) {
+			this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
+			this.#socket?.destroy();
+			return;
+		}
+		for (const decoded of decodedFrames) {
 			let message: DaemonWireMessage;
 			try {
 				message = parseDaemonWireMessage(decoded);
@@ -435,7 +432,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return;
 		socket.write(
-			`${JSON.stringify({
+			encodeLocalJsonlFrame({
 				id: crypto.randomUUID(),
 				token: this.#token,
 				owners: [...this.#completionSinks.keys()],
@@ -445,7 +442,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionUnsubscribes: [...this.#completionUnsubscribes],
 				completionSubscriptionId: this.#completionSubscriptionId,
 				operation: { op: "ping" },
-			})}\n`,
+			}),
 		);
 	}
 
@@ -480,7 +477,15 @@ export async function createDaemonBrokerClient(
 	options: DaemonBrokerClientOptions = {},
 ): Promise<DaemonBrokerClient> {
 	const canonical = await canonicalProjectDir(projectDir);
-	const runtimeDir = options.runtimeDir ?? daemonRuntimeDir(canonical);
+	const requestedRuntimeDir = options.runtimeDir ?? daemonRuntimeDir(canonical);
+	let runtimeDir: string;
+	try {
+		runtimeDir = await fs.realpath(requestedRuntimeDir);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		await fs.mkdir(requestedRuntimeDir, { recursive: true, mode: 0o700 });
+		runtimeDir = await fs.realpath(requestedRuntimeDir);
+	}
 	const token = await readOrCreateToken(runtimeDir);
 	return new SocketDaemonClient(canonical, runtimeDir, token, options);
 }

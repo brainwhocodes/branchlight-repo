@@ -421,6 +421,14 @@ describe("Settings", () => {
 			expect(getDefault("providers.maxInFlightRequests")).toEqual({});
 		});
 
+		it("keeps global OAuth account routing opt-in by default", () => {
+			const settings = Settings.isolated();
+			expect(settings.get("providers.oauthAccountLocks")).toEqual({});
+			expect(settings.get("providers.oauthAccountFailover")).toBe(false);
+			expect(getDefault("providers.oauthAccountLocks")).toEqual({});
+			expect(getDefault("providers.oauthAccountFailover")).toBe(false);
+		});
+
 		it("exposes all tool calling mode options", () => {
 			const values = getEnumValues("tools.format");
 			expect(values).toEqual([
@@ -438,6 +446,42 @@ describe("Settings", () => {
 				"gemma",
 				"minimax",
 			]);
+		});
+	});
+
+	describe("OAuth account routing persistence", () => {
+		it("round-trips a copied provider-to-hash map without persisting runtime account data", async () => {
+			const anthropicHash = "a".repeat(64);
+			const codexHash = "b".repeat(64);
+			await writeSettings({
+				providers: {
+					oauthAccountLocks: { anthropic: anthropicHash },
+					oauthAccountFailover: true,
+				},
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("providers.oauthAccountLocks")).toEqual({ anthropic: anthropicHash });
+			expect(settings.get("providers.oauthAccountFailover")).toBe(true);
+
+			const nextLocks: Record<string, string> = {
+				...settings.get("providers.oauthAccountLocks"),
+				"openai-codex": codexHash,
+			};
+			settings.set("providers.oauthAccountLocks", { ...nextLocks });
+			nextLocks.anthropic = "access-token-that-must-not-be-persisted";
+			nextLocks.credentialId = "42";
+			await settings.flush();
+
+			expect(await readSettings()).toEqual({
+				providers: {
+					oauthAccountLocks: {
+						anthropic: anthropicHash,
+						"openai-codex": codexHash,
+					},
+					oauthAccountFailover: true,
+				},
+			});
 		});
 	});
 

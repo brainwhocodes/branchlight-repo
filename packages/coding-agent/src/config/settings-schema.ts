@@ -155,7 +155,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Developer",
 	],
 	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
-	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
+	providers: ["Accounts", "Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
 };
 
 /** Status line segment identifiers */
@@ -4116,7 +4116,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Browser",
-			description: "Enable the browser tool for scripted Chromium automation (puppeteer)",
+			description: "Enable the browser tool for scripted Chromium automation (Playwright 1.62.1 over CDP)",
 		},
 	},
 
@@ -4140,7 +4140,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Grep & Browser",
 			label: "Browser Relay",
 			description:
-				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser tool needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
+				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser tool needs it. Outside Branchlight, takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
 		},
 	},
 
@@ -4881,6 +4881,27 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Provider selection
+	"providers.oauthAccountLocks": {
+		type: "record",
+		default: EMPTY_STRING_RECORD,
+		ui: {
+			tab: "providers",
+			group: "Accounts",
+			label: "OAuth Accounts",
+			description: "Add, remove, and choose the stored OAuth account used by each provider.",
+		},
+	},
+	"providers.oauthAccountFailover": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Accounts",
+			label: "Account Failover",
+			description:
+				"Allow a locked OAuth account to use another stored account when it is unavailable or rate-limited.",
+		},
+	},
 	"providers.ollama-cloud.maxConcurrency": {
 		type: "number",
 		default: 3,

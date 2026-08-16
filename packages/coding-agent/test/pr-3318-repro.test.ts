@@ -20,6 +20,14 @@ describe("PR 3318 repro", () => {
 		const text = await buildUsageReportText({
 			session: {
 				model: undefined,
+				sessionId: "pr-3318-session",
+				modelRegistry: {
+					authStorage: {
+						getOAuthAccountSelection: () => undefined,
+						listStoredOAuthAccounts: () => [],
+						getOAuthAccountIdentity: () => undefined,
+					},
+				},
 				fetchUsageReports: async () => [report],
 				getUsageReportingModelSelectors: () => ["test-provider/coding-plan-model"],
 			},

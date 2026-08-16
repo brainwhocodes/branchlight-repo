@@ -13,6 +13,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { credentialPinHash } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -111,6 +112,137 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			modelPattern,
 		};
 	}
+
+	function oauthCredential(suffix: string) {
+		return {
+			type: "oauth" as const,
+			access: `access-${suffix}`,
+			refresh: `refresh-${suffix}`,
+			expires: Date.now() + 60_000,
+			accountId: `account-${suffix}`,
+			email: `${suffix}@example.com`,
+		};
+	}
+
+	function accountHash(suffix: string): string {
+		const hash = credentialPinHash("anthropic", {
+			accountId: `account-${suffix}`,
+			email: `${suffix}@example.com`,
+		});
+		if (!hash) throw new Error(`Expected a persistent hash for ${suffix}`);
+		return hash;
+	}
+
+	async function createPolicyAuthStorage(name: string): Promise<AuthStorage> {
+		const authStorage = await AuthStorage.create(path.join(tempDir, `${name}.db`));
+		authStoragesToClose.push(authStorage);
+		await authStorage.set("anthropic", [oauthCredential("a"), oauthCredential("b")]);
+		return authStorage;
+	}
+
+	function expectSelectedPolicy(authStorage: AuthStorage, suffix: string, allowSiblingFailover: boolean): void {
+		const identityHash = accountHash(suffix);
+		const account = authStorage
+			.listStoredOAuthAccounts("anthropic")
+			.find(candidate => candidate.accountId === `account-${suffix}`);
+		expect(authStorage.getOAuthAccountSelection("anthropic")).toEqual({
+			identityHash,
+			credentialId: account?.credentialId,
+			available: true,
+			allowSiblingFailover,
+		});
+	}
+
+	test("installs supplied Settings on supplied AuthStorage before an owned registry refresh", async () => {
+		const authStorage = await createPolicyAuthStorage("owned-registry-policy");
+		const settings = Settings.isolated({
+			"providers.oauthAccountLocks": { anthropic: accountHash("b") },
+			"providers.oauthAccountFailover": true,
+		});
+		const stopAtRefresh = new Error("stop at owned registry refresh");
+		const refreshSpy = vi.spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(function (
+			this: ModelRegistry,
+		) {
+			expect(this.authStorage).toBe(authStorage);
+			expectSelectedPolicy(authStorage, "b", true);
+			throw stopAtRefresh;
+		});
+
+		try {
+			await expect(
+				createAgentSession({
+					cwd: tempDir,
+					agentDir: tempDir,
+					authStorage,
+					settings,
+					sessionManager: SessionManager.inMemory(),
+					disableExtensionDiscovery: true,
+				}),
+			).rejects.toBe(stopAtRefresh);
+		} finally {
+			refreshSpy.mockRestore();
+		}
+	});
+
+	test("installs promised legacy settings before a supplied registry lookup and direct Settings wins", async () => {
+		const cases = [
+			{
+				name: "legacy settingsManager",
+				expectedSuffix: "a",
+				expectedFailover: false,
+				settings: undefined,
+			},
+			{
+				name: "direct Settings",
+				expectedSuffix: "b",
+				expectedFailover: true,
+				settings: Settings.isolated({
+					"providers.oauthAccountLocks": { anthropic: accountHash("b") },
+					"providers.oauthAccountFailover": true,
+				}),
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const authStorage = await createPolicyAuthStorage(`supplied-registry-${testCase.expectedSuffix}`);
+			const modelRegistry = new ModelRegistry(
+				authStorage,
+				path.join(tempDir, `${testCase.expectedSuffix}-models.yml`),
+			);
+			const legacySettings = Settings.isolated({
+				"providers.oauthAccountLocks": { anthropic: accountHash("a") },
+				"providers.oauthAccountFailover": false,
+			});
+			const stopAtLookup = new Error(`stop at ${testCase.name} lookup`);
+			const lookupSpy = vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => {
+				expectSelectedPolicy(authStorage, testCase.expectedSuffix, testCase.expectedFailover);
+				throw stopAtLookup;
+			});
+
+			try {
+				await expect(
+					createAgentSession({
+						cwd: tempDir,
+						agentDir: tempDir,
+						authStorage,
+						modelRegistry,
+						settings: testCase.settings,
+						settingsManager: Promise.resolve(legacySettings),
+						sessionManager: SessionManager.inMemory(),
+						disableExtensionDiscovery: true,
+						skills: [],
+						contextFiles: [],
+						promptTemplates: [],
+						slashCommands: [],
+						enableMCP: false,
+						enableLsp: false,
+					}),
+				).rejects.toBe(stopAtLookup);
+			} finally {
+				lookupSpy.mockRestore();
+			}
+		}
+	});
 
 	test("resolves explicit modelPattern after extension providers register", async () => {
 		const { session, modelFallbackMessage } = await createAgentSession(

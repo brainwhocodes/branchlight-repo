@@ -363,67 +363,10 @@ describe("readRpcSubagentTranscript", () => {
 
 describe("RpcClient subagent frames", () => {
 	test("dispatches subagent frames and session-specific events", async () => {
-		const scriptPath = path.join(os.tmpdir(), `omp-rpc-subagent-client-${Date.now()}.js`);
-		tempPaths.push(scriptPath);
-		await Bun.write(
-			scriptPath,
-			`
-let buffer = "";
-function write(frame) {
-	process.stdout.write(JSON.stringify(frame) + "\\n");
-}
-const progress = {
-	index: 0,
-	id: "SubagentA",
-	agent: "task",
-	agentSource: "bundled",
-	status: "running",
-	task: "Do work",
-	assignment: "Implement work",
-	recentTools: [],
-	recentOutput: [],
-	toolCount: 0,
-	tokens: 0,
-	cost: 0,
-	durationMs: 0
-};
-write({ type: "ready" });
-process.stdin.on("data", chunk => {
-	buffer += chunk.toString("utf8");
-	let index = buffer.indexOf("\\n");
-	while (index !== -1) {
-		const line = buffer.slice(0, index).trim();
-		buffer = buffer.slice(index + 1);
-		if (line) handle(JSON.parse(line));
-		index = buffer.indexOf("\\n");
-	}
-});
-function handle(frame) {
-	if (frame.type === "set_subagent_subscription") {
-		write({ id: frame.id, type: "response", command: "set_subagent_subscription", success: true, data: { level: frame.level } });
-		return;
-	}
-	if (frame.type === "get_subagents") {
-		write({ id: frame.id, type: "response", command: "get_subagents", success: true, data: { subagents: [{ id: "SubagentA", index: 0, agent: "task", agentSource: "bundled", status: "running", lastUpdate: 1 }] } });
-		return;
-	}
-	if (frame.type === "get_subagent_messages") {
-		write({ id: frame.id, type: "response", command: "get_subagent_messages", success: true, data: { sessionFile: frame.sessionFile || "/tmp/subagent.jsonl", fromByte: frame.fromByte || 0, nextByte: 0, reset: false, entries: [], messages: [] } });
-		return;
-	}
-	if (frame.type === "prompt") {
-		write({ id: frame.id, type: "response", command: "prompt", success: true });
-		write({ type: "notice", level: "info", message: "subagent test" });
-		write({ type: "subagent_lifecycle", payload: { id: "SubagentA", index: 0, agent: "task", agentSource: "bundled", status: "started", sessionFile: "/tmp/subagent.jsonl" } });
-		write({ type: "subagent_progress", payload: { index: 0, agent: "task", agentSource: "bundled", task: "Do work", assignment: "Implement work", sessionFile: "/tmp/subagent.jsonl", progress } });
-		write({ type: "subagent_event", payload: { id: "SubagentA", event: { type: "agent_start" } } });
-		write({ type: "agent_end", messages: [] });
-	}
-}
-`,
-		);
-
-		using client = new RpcClient({ cliPath: scriptPath });
+		const client = new RpcClient({
+			cliPath: path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts"),
+			env: { MOCK_RPC_SCENARIO: "subagents" },
+		});
 		const lifecycleIds: string[] = [];
 		const progressTasks: string[] = [];
 		const rawEventTypes: string[] = [];
@@ -433,17 +376,21 @@ function handle(frame) {
 		client.onSubagentEvent(payload => rawEventTypes.push(payload.event.type));
 		client.onSessionEvent(event => sessionEventTypes.push(event.type));
 
-		await client.start();
-		await expect(client.setSubagentSubscription("events")).resolves.toBe("events");
-		await client.promptAndWait("Trigger subagent frames");
-		expect(await client.getSubagents()).toHaveLength(1);
-		expect(await client.getSubagentMessages({ sessionFile: "/tmp/subagent.jsonl" })).toMatchObject({
-			sessionFile: "/tmp/subagent.jsonl",
-		});
+		try {
+			await client.start();
+			await expect(client.setSubagentSubscription("events")).resolves.toBe("events");
+			await client.promptAndWait("Trigger subagent frames");
+			expect(await client.getSubagents()).toHaveLength(1);
+			expect(await client.getSubagentMessages({ sessionFile: "/tmp/subagent.jsonl" })).toMatchObject({
+				sessionFile: "/tmp/subagent.jsonl",
+			});
 
-		expect(lifecycleIds).toEqual(["SubagentA"]);
-		expect(progressTasks).toEqual(["Do work"]);
-		expect(rawEventTypes).toEqual(["agent_start"]);
-		expect(sessionEventTypes).toContain("notice");
+			expect(lifecycleIds).toEqual(["SubagentA"]);
+			expect(progressTasks).toEqual(["Do work"]);
+			expect(rawEventTypes).toEqual(["agent_start"]);
+			expect(sessionEventTypes).toContain("notice");
+		} finally {
+			await client.stop();
+		}
 	});
 });

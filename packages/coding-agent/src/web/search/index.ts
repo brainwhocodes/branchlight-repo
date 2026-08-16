@@ -9,7 +9,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { ModelRegistry } from "../../config/model-registry";
+import type { ModelRegistry } from "../../config/model-registry";
 import { settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../extensibility/custom-tools/types";
 import type { Theme } from "../../modes/theme/theme";
@@ -284,30 +284,30 @@ async function executeSearch(
 /**
  * Execute a web search query for CLI/testing workflows.
  *
- * `authStorage` may be omitted; in that case we discover one via the standard
- * factory (`discoverAuthStorage`), which honours `OMP_AUTH_BROKER_URL` and
- * otherwise opens the local SQLite credential store.
+ * The caller owns authentication storage and must supply it directly or through
+ * a model registry. Keeping discovery at the application boundary ensures any
+ * persisted account-selection policy is installed before provider lookup.
  */
 export async function runSearchQuery(
 	params: SearchQueryParams,
 	options: { authStorage?: AuthStorage; modelRegistry?: ModelRegistry; sessionId?: string; signal?: AbortSignal } = {},
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
-	const createdAuthStorage = options.authStorage || options.modelRegistry ? undefined : await discoverAuthStorage();
-	const authStorage = options.authStorage ?? options.modelRegistry?.authStorage ?? createdAuthStorage;
+	if (options.authStorage && options.modelRegistry && options.authStorage !== options.modelRegistry.authStorage) {
+		throw new Error(
+			"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
+		);
+	}
+	const authStorage = options.modelRegistry?.authStorage ?? options.authStorage;
 	if (!authStorage) {
-		throw new Error("Failed to initialize authentication storage");
+		throw new Error("runSearchQuery requires configured authentication storage");
 	}
-	const modelRegistry = options.modelRegistry ?? (createdAuthStorage ? new ModelRegistry(authStorage) : undefined);
-	try {
-		return await executeSearch("cli-web-search", params, {
-			authStorage,
-			modelRegistry,
-			sessionId: options.sessionId,
-			signal: options.signal,
-		});
-	} finally {
-		createdAuthStorage?.close();
-	}
+	const modelRegistry = options.modelRegistry;
+	return executeSearch("cli-web-search", params, {
+		authStorage,
+		modelRegistry,
+		sessionId: options.sessionId,
+		signal: options.signal,
+	});
 }
 
 /**

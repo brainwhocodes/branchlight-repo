@@ -1,4 +1,5 @@
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
+import type { AvailableCommand } from "@oh-my-pi/pi-utils/acp";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
@@ -107,6 +108,43 @@ export function buildTuiBuiltinSlashCommands(runtime: TuiSlashCommandRuntime): R
  * ACP dispatcher requires `handle` and skips TUI-only entries.
  */
 export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = BUILTIN_SLASH_COMMAND_REGISTRY;
+
+/**
+ * All names (primary + aliases) reserved by ACP-capable builtins.
+ *
+ * This metadata lives beside the unified registry so importing the ACP
+ * dispatcher during registry initialization never reads an uninitialized
+ * registry binding.
+ */
+export const ACP_BUILTIN_RESERVED_NAMES: ReadonlySet<string> = new Set(
+	BUILTIN_SLASH_COMMANDS_INTERNAL.filter(command => command.handle !== undefined).flatMap(command => [
+		command.name,
+		...(command.aliases ?? []),
+	]),
+);
+
+/**
+ * Whether an extension command name would be captured by ACP builtin dispatch.
+ * `parseSlashCommand` treats `:` as a name/argument separator, so names such as
+ * `model:foo` are also shadowed when their prefix is a handled builtin.
+ */
+export function isAcpBuiltinShadowedName(name: string): boolean {
+	if (ACP_BUILTIN_RESERVED_NAMES.has(name)) return true;
+	const colon = name.indexOf(":");
+	return colon !== -1 && ACP_BUILTIN_RESERVED_NAMES.has(name.slice(0, colon));
+}
+
+/** Commands advertised to ACP clients; TUI-only entries are excluded. */
+export const ACP_BUILTIN_SLASH_COMMANDS: AvailableCommand[] = BUILTIN_SLASH_COMMANDS_INTERNAL.filter(
+	command => command.handle !== undefined,
+).map(command => {
+	const hint = command.acpInputHint ?? command.inlineHint;
+	return {
+		name: command.name,
+		description: command.acpDescription ?? command.description,
+		input: hint ? { hint } : undefined,
+	};
+});
 
 /**
  * Execute a builtin slash command in the interactive TUI.

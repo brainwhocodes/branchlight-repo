@@ -17,8 +17,13 @@
  * stick or re-rank.
  */
 
+import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import type { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 import type { SessionManager } from "./session-manager";
+
+export const GLOBAL_ACCOUNT_LOCK_SESSION_PIN_MESSAGE =
+	"This provider has a global account lock. Change it in /settings > Providers > Accounts, or choose Automatic before using /session pin.";
 
 /** Account fields shared by `OAuthAccountIdentity` and `OAuthAccountSummary`. */
 interface CredentialPinIdentity {
@@ -42,7 +47,7 @@ interface CredentialPinIdentity {
  * Returns `undefined` when the identity carries no account key at all.
  */
 export function credentialPinHash(provider: string, identity: CredentialPinIdentity): string | undefined {
-	if (!identity.accountId && !identity.email) return undefined;
+	if (!identity.accountId && !identity.email && !identity.projectId && !identity.orgId) return undefined;
 	const key = [
 		provider,
 		identity.accountId ?? "",
@@ -51,6 +56,45 @@ export function credentialPinHash(provider: string, identity: CredentialPinIdent
 		identity.projectId ?? "",
 	].join("\0");
 	return new Bun.CryptoHasher("sha256").update(key).digest("hex");
+}
+
+/**
+ * Only registered credential-storage provider IDs and provider IDs with stored
+ * OAuth rows are accepted. Persisted hashes remain authoritative when their
+ * account is missing or ambiguous; only an exact unique match receives a
+ * runtime credential ID.
+ */
+export function installOAuthAccountSelectionFromSettings(settings: Settings, authStorage: AuthStorage): void {
+	const storageProviders = new Set(
+		authStorage.list().filter(provider => authStorage.listStoredOAuthAccounts(provider).length > 0),
+	);
+	for (const provider of getOAuthProviders()) {
+		storageProviders.add(provider.storeCredentialsAs ?? provider.id);
+	}
+	const configuredLocks: unknown = settings.get("providers.oauthAccountLocks");
+	const lockEntries =
+		configuredLocks !== null && typeof configuredLocks === "object" && !Array.isArray(configuredLocks)
+			? Object.entries(configuredLocks as Record<string, unknown>)
+			: [];
+
+	const selections = Object.create(null) as Record<string, { identityHash: string; credentialId?: number }>;
+	for (const [provider, identityHash] of lockEntries) {
+		if (typeof identityHash !== "string" || !storageProviders.has(provider) || !/^[0-9a-f]{64}$/.test(identityHash)) {
+			continue;
+		}
+		const matches = authStorage
+			.listStoredOAuthAccounts(provider)
+			.filter(account => credentialPinHash(provider, account) === identityHash);
+		selections[provider] = {
+			identityHash,
+			credentialId: matches.length === 1 ? matches[0].credentialId : undefined,
+		};
+	}
+
+	authStorage.setOAuthAccountSelectionPolicy({
+		selections,
+		allowSiblingFailover: settings.get("providers.oauthAccountFailover") === true,
+	});
 }
 
 /**
@@ -82,6 +126,7 @@ export function recordCredentialPin(
  */
 export function seedCredentialPins(authStorage: AuthStorage, sessionManager: SessionManager, sessionId: string): void {
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
+		if (authStorage.getOAuthAccountSelection(provider)) continue;
 		const accounts = authStorage.listOAuthAccounts(provider, sessionId);
 		if (accounts.length === 0 || accounts.some(account => account.active)) continue;
 		const match = accounts.find(account => credentialPinHash(provider, account) === pin.hash);

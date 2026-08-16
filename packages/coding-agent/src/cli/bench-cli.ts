@@ -33,6 +33,7 @@ import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { typ
 import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: "text" };
 import benchPrompt from "../prompts/bench.md" with { type: "text" };
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
+import { installOAuthAccountSelectionFromSettings } from "../session/credential-pin";
 import {
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
@@ -621,6 +622,7 @@ async function createDefaultRuntime(): Promise<BenchRuntime> {
 	try {
 		const cwd = getProjectDir();
 		const settings = await Settings.init({ cwd });
+		installOAuthAccountSelectionFromSettings(settings, authStorage);
 		const modelRegistry = new ModelRegistry(authStorage);
 		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 		return {

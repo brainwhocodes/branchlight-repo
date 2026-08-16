@@ -36,6 +36,7 @@
     "check:types": "tsgo -p tsconfig.json --noEmit",
     "lint": "biome lint .",
     "test": "bun ../../scripts/ci-test-ts.ts coding-agent-heavy --full",
+    "test:browser": "bun test test/tools/browser*.test.ts",
     "fix": "biome check --write --unsafe . && bun run format-prompts",
     "fmt": "biome format --write . && bun run format-prompts",
     "format-prompts": "bun scripts/format-prompts.ts",
@@ -56,11 +57,13 @@
     "@oh-my-pi/pi-agent-core": "catalog:",
     "@oh-my-pi/pi-ai": "catalog:",
     "@oh-my-pi/pi-catalog": "catalog:",
+    "@oh-my-pi/pi-grpc": "catalog:",
     "@oh-my-pi/pi-mnemopi": "catalog:",
     "@oh-my-pi/pi-natives": "catalog:",
     "@oh-my-pi/pi-tui": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",
     "@oh-my-pi/pi-wire": "catalog:",
+    "@oh-my-pi/pi-workspace-runtime": "catalog:",
     "@oh-my-pi/snapcompact": "catalog:",
     "@opentelemetry/api": "catalog:",
     "@opentelemetry/api-logs": "catalog:",
@@ -73,8 +76,9 @@
     "@opentelemetry/sdk-metrics": "catalog:",
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
+    "chromium-bidi": "catalog:",
     "mupdf": "catalog:",
-    "puppeteer-core": "catalog:"
+    "playwright-core": "catalog:"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "catalog:",

@@ -11,7 +11,7 @@
  * dev-time, network-bound step, exactly like `generate-models`.
  *
  * The tab worker imports the `.txt` with `{ type: "text" }`, wraps it in a
- * `new Function` worker-side, and runs it via puppeteer's CDP evaluate (it
+ * `new Function` worker-side, and runs it via Playwright's CDP evaluation (it
  * installs nothing on `window`). The committed output means binary and source
  * installs need no network or build step at runtime.
  *

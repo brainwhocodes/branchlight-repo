@@ -44,6 +44,7 @@ import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
+import { installOAuthAccountSelectionFromSettings } from "../session/credential-pin";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
@@ -2816,22 +2817,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 		try {
 			checkAbort();
-			// Pin authStorage to modelRegistry.authStorage — mirrors the createAgentSession invariant.
-			const registryFromParent = options.modelRegistry !== undefined;
-			const modelRegistry =
-				options.modelRegistry ??
-				new ModelRegistry(options.authStorage ?? (await awaitAbortable(discoverAuthStorage())));
-			const authStorage = modelRegistry.authStorage;
-			if (options.authStorage && options.authStorage !== authStorage) {
-				throw new Error(
-					"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
-				);
-			}
-			checkAbort();
-			if (!registryFromParent) {
-				modelRegistry.refreshInBackground();
-			} else {
+			// Parent registries already carry their session's installed policy. Owned
+			// registries install this task's Settings snapshot before construction.
+			let authStorage: AuthStorage;
+			let modelRegistry: ModelRegistry;
+			if (options.modelRegistry) {
+				modelRegistry = options.modelRegistry;
+				authStorage = modelRegistry.authStorage;
+				if (options.authStorage && options.authStorage !== authStorage) {
+					throw new Error(
+						"options.authStorage and options.modelRegistry.authStorage must be the same instance when both are provided",
+					);
+				}
 				logger.debug("runSubagent: reusing parent modelRegistry; skipping refresh");
+			} else {
+				authStorage = options.authStorage ?? (await awaitAbortable(discoverAuthStorage()));
+				checkAbort();
+				installOAuthAccountSelectionFromSettings(settings, authStorage);
+				modelRegistry = new ModelRegistry(authStorage);
+				modelRegistry.refreshInBackground();
 			}
 			checkAbort();
 

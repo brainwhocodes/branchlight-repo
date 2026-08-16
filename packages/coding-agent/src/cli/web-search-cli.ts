@@ -6,9 +6,12 @@
 
 import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { ModelRegistry } from "../config/model-registry";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { Settings } from "../config/settings";
 import { initTheme, theme } from "../modes/theme/theme";
+import { discoverAuthStorage } from "../sdk";
+import { installOAuthAccountSelectionFromSettings } from "../session/credential-pin";
 import { runSearchQuery, type SearchQueryParams } from "../web/search/index";
 import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
 import { renderSearchResult } from "../web/search/render";
@@ -87,29 +90,36 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 		process.exit(1);
 	}
 
-	const settings = await Settings.init({ cwd: getProjectDir() });
-	applyProviderGlobalsFromSettings(settings);
+	const authStorage = await discoverAuthStorage();
+	try {
+		const settings = await Settings.init({ cwd: getProjectDir() });
+		installOAuthAccountSelectionFromSettings(settings, authStorage);
+		const modelRegistry = new ModelRegistry(authStorage);
+		applyProviderGlobalsFromSettings(settings);
 
-	await initTheme();
+		await initTheme();
 
-	const params: SearchQueryParams = {
-		query: cmd.query,
-		provider: cmd.provider,
-		recency: cmd.recency,
-		limit: cmd.limit,
-	};
+		const params: SearchQueryParams = {
+			query: cmd.query,
+			provider: cmd.provider,
+			recency: cmd.recency,
+			limit: cmd.limit,
+		};
 
-	const result = await runSearchQuery(params);
-	const component = renderSearchResult(result, { expanded: cmd.expanded, isPartial: false }, theme, {
-		query: cmd.query,
-		maxAnswerLines: cmd.expanded ? undefined : 6,
-	});
+		const result = await runSearchQuery(params, { authStorage, modelRegistry });
+		const component = renderSearchResult(result, { expanded: cmd.expanded, isPartial: false }, theme, {
+			query: cmd.query,
+			maxAnswerLines: cmd.expanded ? undefined : 6,
+		});
 
-	const width = Math.max(60, process.stdout.columns ?? 100);
-	process.stdout.write(`${component.render(width).join("\n")}\n`);
+		const width = Math.max(60, process.stdout.columns ?? 100);
+		process.stdout.write(`${component.render(width).join("\n")}\n`);
 
-	if (result.details?.error) {
-		process.exitCode = 1;
+		if (result.details?.error) {
+			process.exitCode = 1;
+		}
+	} finally {
+		authStorage.close();
 	}
 }
 

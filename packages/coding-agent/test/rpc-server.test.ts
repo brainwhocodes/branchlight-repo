@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { RpcHostToolBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-tools";
 import {
-	dispatchRpcInputFrame,
+	dispatchRpcCommand,
 	type PendingExtensionRequest,
-	RpcInputDispatcher,
-	type RpcInputFrameDeps,
+	type RpcCommandDeps,
+	RpcCommandDispatcher,
+	RpcGrpcOutput,
 	RpcPendingExtensionRequests,
 	RpcShutdownCoordinator,
+	rpcApplicationObjectToServerFrame,
+	rpcClientFrameToApplicationObject,
+	serveRpcConnection,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type {
 	RpcCommand,
@@ -15,15 +19,22 @@ import type {
 	RpcHostToolCancelRequest,
 	RpcResponse,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import {
+	OMP_GRPC_MAX_MESSAGE_BYTES,
+	OMP_GRPC_PROTOCOL_VERSION,
+	type OmpGrpcClientFrame,
+	type OmpGrpcServerConnection,
+	type OmpGrpcServerFrame,
+} from "@oh-my-pi/pi-grpc";
 
 type OutputFrame = RpcResponse | object;
 
 const makeDeps = (
-	handleCommand: RpcInputFrameDeps["handleCommand"],
+	handleCommand: RpcCommandDeps["handleCommand"],
 	options?: { pendingExtensionRequests?: Map<string, PendingExtensionRequest> },
 ) => {
 	const outputs: OutputFrame[] = [];
-	const deps: RpcInputFrameDeps = {
+	const deps: RpcCommandDeps = {
 		handleCommand,
 		output: obj => {
 			outputs.push(obj as OutputFrame);
@@ -44,8 +55,27 @@ const makeDeps = (
 };
 
 const flushMicrotasks = () => new Promise<void>(resolve => setImmediate(resolve));
+function makeGrpcConnection(clientFrames: readonly OmpGrpcClientFrame[]): {
+	connection: OmpGrpcServerConnection;
+	sent: OmpGrpcServerFrame[];
+} {
+	const sent: OmpGrpcServerFrame[] = [];
+	const frames = (async function* () {
+		for (const frame of clientFrames) yield frame;
+	})();
+	return {
+		connection: {
+			frames,
+			send: async frame => {
+				sent.push(frame);
+			},
+			close: async () => {},
+		},
+		sent,
+	};
+}
 
-const requestExtensionInput = (deps: RpcInputFrameDeps, id: string, message: string) => {
+const requestExtensionInput = (deps: RpcCommandDeps, id: string, message: string) => {
 	const response = Promise.withResolvers<RpcExtensionUIResponse>();
 	deps.pendingExtensionRequests.set(id, {
 		resolve: response.resolve,
@@ -77,7 +107,107 @@ const cancelledBashResponse = (id: string): RpcResponse => ({
 	},
 });
 
-describe("dispatchRpcInputFrame", () => {
+describe("gRPC application frame mapping", () => {
+	test("transport metadata cannot be replaced by application payload fields", () => {
+		expect(
+			rpcClientFrameToApplicationObject({
+				kind: "command",
+				command: {
+					id: "transport-id",
+					command: "abort",
+					payload: { id: "payload-id", type: "prompt", message: "ignored" },
+				},
+			}),
+		).toEqual({ id: "transport-id", type: "abort", message: "ignored" });
+		expect(
+			rpcClientFrameToApplicationObject({
+				kind: "push",
+				type: "host_uri_result",
+				payload: { type: "extension_ui_response", id: "uri-1", content: "value" },
+			}),
+		).toEqual({ type: "host_uri_result", id: "uri-1", content: "value" });
+	});
+
+	test("responses and host/UI/URI pushes retain their application bodies", () => {
+		expect(
+			rpcApplicationObjectToServerFrame({
+				type: "response",
+				id: "request-1",
+				command: "get_state",
+				success: true,
+				data: { isStreaming: false },
+			}),
+		).toEqual({
+			kind: "response",
+			id: "request-1",
+			command: "get_state",
+			success: true,
+			data: { isStreaming: false },
+		});
+		for (const value of [
+			{ type: "extension_ui_request", id: "ui-1", method: "notify", message: "hello" },
+			{ type: "host_tool_call", id: "tool-1", toolCallId: "call-1", toolName: "echo", arguments: {} },
+			{ type: "host_uri_request", id: "uri-1", operation: "read", url: "notes://one" },
+		]) {
+			const { type, ...payload } = value;
+			expect(rpcApplicationObjectToServerFrame(value)).toEqual({ kind: "push", type, payload });
+		}
+	});
+});
+
+describe("serveRpcConnection", () => {
+	test("dispatches gRPC commands, sends correlated responses, and cleans up on stream close", async () => {
+		const { connection, sent } = makeGrpcConnection([
+			{
+				kind: "command",
+				command: { id: "retry-1", command: "abort_retry", payload: {} },
+			},
+		]);
+		const lifecycle: string[] = [];
+		const disconnected = Promise.withResolvers<void>();
+		const { deps } = makeDeps(async command => {
+			lifecycle.push(`dispatch:${command.type}`);
+			await disconnected.promise;
+			lifecycle.push(`complete:${command.type}`);
+			return { id: command.id, type: "response", command: "abort_retry", success: true };
+		});
+		const grpcOutput = new RpcGrpcOutput(connection);
+		grpcOutput.sendFrame({
+			kind: "ready",
+			protocolVersion: OMP_GRPC_PROTOCOL_VERSION,
+			maxMessageBytes: OMP_GRPC_MAX_MESSAGE_BYTES,
+		});
+		deps.output = value => {
+			grpcOutput.output(value);
+		};
+
+		await serveRpcConnection(connection, {
+			deps,
+			onDisconnect: () => {
+				lifecycle.push("disconnect");
+				disconnected.resolve();
+			},
+		});
+		await grpcOutput.drain();
+
+		expect(lifecycle).toEqual(["dispatch:abort_retry", "disconnect", "complete:abort_retry"]);
+		expect(sent).toEqual([
+			{
+				kind: "ready",
+				protocolVersion: 1,
+				maxMessageBytes: 64 * 1024 * 1024,
+			},
+			{
+				kind: "response",
+				id: "retry-1",
+				command: "abort_retry",
+				success: true,
+			},
+		]);
+	});
+});
+
+describe("dispatchRpcCommand", () => {
 	test("bash is dispatched in the background so abort_bash preempts it (issue #4079 A)", async () => {
 		const { promise: bashPending, resolve: resolveBash } = Promise.withResolvers<RpcResponse>();
 		let abortBashCalled = false;
@@ -99,16 +229,16 @@ describe("dispatchRpcInputFrame", () => {
 
 		const { deps, outputs } = makeDeps(handleCommand);
 
-		// Kick off bash. If the fix works, dispatchRpcInputFrame returns
+		// Kick off bash. If the fix works, dispatchRpcCommand returns
 		// undefined immediately without waiting for handleCommand.
-		const bashAwait = dispatchRpcInputFrame({ id: "b1", type: "bash", command: "sleep 9999" }, deps);
+		const bashAwait = dispatchRpcCommand({ id: "b1", type: "bash", command: "sleep 9999" }, deps);
 		expect(bashAwait).toBeUndefined();
 		await flushMicrotasks();
 		expect(outputs).toHaveLength(0);
 
 		// Now dispatch abort_bash. It must run serially (not backgrounded)
 		// and resolve after handleCommand completes.
-		const abortAwait = dispatchRpcInputFrame({ id: "a1", type: "abort_bash" }, deps);
+		const abortAwait = dispatchRpcCommand({ id: "a1", type: "abort_bash" }, deps);
 		expect(abortAwait).toBeInstanceOf(Promise);
 		await abortAwait;
 
@@ -150,16 +280,15 @@ describe("dispatchRpcInputFrame", () => {
 
 		const { deps, outputs } = makeDeps(handleCommand);
 
-		const first = dispatchRpcInputFrame({ id: "c1", type: "abort_retry" }, deps);
+		const first = dispatchRpcCommand({ id: "c1", type: "abort_retry" }, deps);
 		expect(first).toBeInstanceOf(Promise);
-		// The input loop awaits each command's promise before pulling the next
-		// frame; simulate that contract by awaiting before the next dispatch.
+		// Simulate serialized stream dispatch by awaiting before the next command.
 		await first;
 		expect(outputs).toHaveLength(1);
 		expect(started).toEqual(["abort_retry"]);
 		expect(finished).toEqual(["abort_retry"]);
 
-		const second = dispatchRpcInputFrame({ id: "c2", type: "set_auto_retry", enabled: true }, deps);
+		const second = dispatchRpcCommand({ id: "c2", type: "set_auto_retry", enabled: true }, deps);
 		await second;
 		expect(outputs).toHaveLength(2);
 		expect(started).toEqual(["abort_retry", "set_auto_retry"]);
@@ -173,7 +302,7 @@ describe("dispatchRpcInputFrame", () => {
 
 		const { deps, outputs } = makeDeps(handleCommand);
 
-		const awaited = dispatchRpcInputFrame({ id: "b2", type: "bash", command: "echo hi" }, deps);
+		const awaited = dispatchRpcCommand({ id: "b2", type: "bash", command: "echo hi" }, deps);
 		expect(awaited).toBeUndefined();
 
 		// Give the background dispatch a chance to run its catch.
@@ -190,7 +319,7 @@ describe("dispatchRpcInputFrame", () => {
 		});
 	});
 
-	test("background bash task is exposed so EOF cleanup can await its response", async () => {
+	test("background bash task is exposed so disconnect cleanup can await its response", async () => {
 		const bashResponse: RpcResponse = {
 			id: "b3",
 			type: "response",
@@ -217,7 +346,7 @@ describe("dispatchRpcInputFrame", () => {
 			trackedTask = task;
 		};
 
-		const awaited = dispatchRpcInputFrame({ id: "b3", type: "bash", command: "echo done" }, deps);
+		const awaited = dispatchRpcCommand({ id: "b3", type: "bash", command: "echo done" }, deps);
 		expect(awaited).toBeUndefined();
 		expect(trackedTask).toBeInstanceOf(Promise);
 		expect(outputs).toHaveLength(0);
@@ -229,9 +358,9 @@ describe("dispatchRpcInputFrame", () => {
 	});
 });
 
-describe("RpcInputDispatcher", () => {
-	test("control frames resolve extension UI requests while an ordinary command is active", async () => {
-		let depsRef: RpcInputFrameDeps;
+describe("RpcCommandDispatcher", () => {
+	test("control pushes resolve extension UI requests while an ordinary command is active", async () => {
+		let depsRef: RpcCommandDeps;
 		const { deps, outputs } = makeDeps(async command => {
 			if (command.type !== "prompt") throw new Error(`unexpected command type: ${command.type}`);
 			const response = await requestExtensionInput(depsRef, "ui-active", "Continue?");
@@ -244,7 +373,7 @@ describe("RpcInputDispatcher", () => {
 			};
 		});
 		depsRef = deps;
-		const dispatcher = new RpcInputDispatcher({ deps });
+		const dispatcher = new RpcCommandDispatcher({ deps });
 
 		dispatcher.dispatch({ id: "prompt-1", type: "prompt", message: "ask extension" });
 		await flushMicrotasks();
@@ -275,28 +404,6 @@ describe("RpcInputDispatcher", () => {
 				success: true,
 				data: { agentInvoked: true },
 			},
-		]);
-	});
-
-	test("malformed frames emit a parse error without ending the input reader", () => {
-		const { deps, outputs } = makeDeps(async command => ({
-			id: command.id,
-			type: "response",
-			command: "prompt",
-			success: true,
-			data: { agentInvoked: false },
-		}));
-		const dispatcher = new RpcInputDispatcher({ deps });
-
-		dispatcher.dispatch(null);
-
-		expect(outputs).toEqual([
-			expect.objectContaining({
-				type: "response",
-				command: "parse",
-				success: false,
-				error: expect.stringContaining("Failed to parse command:"),
-			}),
 		]);
 	});
 
@@ -331,12 +438,20 @@ describe("RpcInputDispatcher", () => {
 						messageCount: 0,
 						queuedMessageCount: 0,
 						todoPhases: [],
+						runtime: {
+							pid: 1234,
+							uptimeMs: 1000,
+							residentMemoryBytes: 64 * 1024 * 1024,
+							heapUsedBytes: 16 * 1024 * 1024,
+							heapTotalBytes: 32 * 1024 * 1024,
+							externalMemoryBytes: 1024,
+						},
 					},
 				};
 			}
 			throw new Error(`unexpected command type: ${command.type}`);
 		});
-		const dispatcher = new RpcInputDispatcher({ deps });
+		const dispatcher = new RpcCommandDispatcher({ deps });
 
 		dispatcher.dispatch({ id: "first", type: "abort_retry" });
 		dispatcher.dispatch({ id: "second", type: "get_state" });
@@ -364,7 +479,7 @@ describe("RpcInputDispatcher", () => {
 			}
 			throw new Error(`unexpected command type: ${command.type}`);
 		});
-		const dispatcher = new RpcInputDispatcher({ deps });
+		const dispatcher = new RpcCommandDispatcher({ deps });
 
 		dispatcher.dispatch({ id: "bad", type: "abort_retry" });
 		dispatcher.dispatch({ id: "next", type: "set_auto_retry", enabled: true });
@@ -388,7 +503,7 @@ describe("RpcInputDispatcher", () => {
 		]);
 	});
 
-	test("drain after EOF rejects active and queued host tool requests without emitting new calls", async () => {
+	test("drain after disconnect rejects active and queued host tool requests without emitting new calls", async () => {
 		const disconnectMessage = "RPC client disconnected before host tool execution completed";
 		const hostToolFrames: Array<RpcHostToolCallRequest | RpcHostToolCancelRequest> = [];
 		const bridge = new RpcHostToolBridge(frame => {
@@ -418,7 +533,7 @@ describe("RpcInputDispatcher", () => {
 				data: { agentInvoked: true },
 			};
 		});
-		const dispatcher = new RpcInputDispatcher({ deps });
+		const dispatcher = new RpcCommandDispatcher({ deps });
 
 		dispatcher.dispatch({ id: "active", type: "prompt", message: "active host tool" });
 		dispatcher.dispatch({ id: "queued", type: "prompt", message: "queued host tool" });
@@ -456,11 +571,11 @@ describe("RpcInputDispatcher", () => {
 		]);
 	});
 
-	test("drain after EOF rejects active and future extension UI requests", async () => {
+	test("drain after disconnect rejects active and future extension UI requests", async () => {
 		const disconnectMessage = "RPC client disconnected before extension UI response completed";
 		const pendingExtensionRequests = new RpcPendingExtensionRequests();
 		const started: string[] = [];
-		let depsRef: RpcInputFrameDeps;
+		let depsRef: RpcCommandDeps;
 		const { deps, outputs } = makeDeps(
 			async command => {
 				if (command.type !== "prompt") throw new Error(`unexpected command type: ${command.type}`);
@@ -477,7 +592,7 @@ describe("RpcInputDispatcher", () => {
 			{ pendingExtensionRequests },
 		);
 		depsRef = deps;
-		const dispatcher = new RpcInputDispatcher({ deps });
+		const dispatcher = new RpcCommandDispatcher({ deps });
 
 		dispatcher.dispatch({ id: "active", type: "prompt", message: "active dialog" });
 		dispatcher.dispatch({ id: "queued", type: "prompt", message: "queued dialog" });
@@ -563,17 +678,16 @@ describe("RpcShutdownCoordinator", () => {
 	test("deferred shutdown drains an in-flight background bash before performShutdown", async () => {
 		const { gate, deps, outputs, shutdown, recorder, coordinator } = makeBashHarness();
 
-		const awaited = dispatchRpcInputFrame({ id: "s1", type: "bash", command: "sleep 9999" }, deps);
+		const awaited = dispatchRpcCommand({ id: "s1", type: "bash", command: "sleep 9999" }, deps);
 		expect(awaited).toBeUndefined();
 
-		// Extension calls pi.shutdown() while bash is in flight; the input loop
-		// re-checks after its next serially-awaited frame.
+		// Extension calls pi.shutdown() while bash is in flight; the dispatcher
+		// re-checks after its next serially-awaited command.
 		shutdown.requested = true;
 		const check = coordinator.checkShutdownRequested();
 
 		// The check must stay pending while the background bash still owes its
-		// response frame. Race it against a flushed sentinel: if the check could
-		// resolve, its microtask would win before the setImmediate tick.
+		// response; race it against a flushed sentinel.
 		const winner = await Promise.race([check.then(() => "shutdown"), flushMicrotasks().then(() => "pending")]);
 		expect(winner).toBe("pending");
 		expect(recorder.state.calls).toBe(0);
@@ -584,19 +698,18 @@ describe("RpcShutdownCoordinator", () => {
 
 		expect(outputs).toEqual([cancelledBashResponse("s1")]);
 		expect(recorder.state.calls).toBe(1);
-		// The bash response frame was already written when performShutdown ran.
+		// The bash response was already queued when performShutdown ran.
 		expect(recorder.state.outputsAtShutdown).toBe(1);
 	});
 
 	test("settle hook fires the deferred shutdown when no further client frames arrive", async () => {
 		const { gate, deps, outputs, shutdown, recorder } = makeBashHarness();
 
-		const awaited = dispatchRpcInputFrame({ id: "s2", type: "bash", command: "sleep 9999" }, deps);
+		const awaited = dispatchRpcCommand({ id: "s2", type: "bash", command: "sleep 9999" }, deps);
 		expect(awaited).toBeUndefined();
 
-		// Shutdown requested mid-bash; the stdin loop is parked with no frames,
-		// so the test never calls checkShutdownRequested() — only track()'s
-		// settle hook can trigger it.
+		// Shutdown requested mid-bash while the Connect stream remains open with
+		// no further frames, so only track()'s settle hook can trigger it.
 		shutdown.requested = true;
 		await flushMicrotasks();
 		expect(recorder.state.calls).toBe(0);
@@ -623,7 +736,7 @@ describe("RpcShutdownCoordinator", () => {
 		coordinator.track(gateA.promise);
 		coordinator.track(gateB.promise);
 
-		// Explicit trigger (input loop) races the settle hooks of both tasks.
+		// An explicit dispatcher trigger races the settle hooks of both tasks.
 		const check = coordinator.checkShutdownRequested();
 		gateA.resolve();
 		gateB.resolve();

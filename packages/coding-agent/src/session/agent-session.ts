@@ -8513,12 +8513,15 @@ export class AgentSession {
 
 	/**
 	 * Pin a stored OAuth account to the current model provider for this session.
-	 * Returns false while streaming or when the credential is no longer available.
+	 * Returns false while streaming, when a global account selection is
+	 * configured, or when the credential is no longer available.
 	 */
 	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
-		return this.#modelRegistry.authStorage.pinSessionOAuthAccount(provider, this.sessionId, credentialId);
+		const authStorage = this.#modelRegistry.authStorage;
+		if (authStorage.getOAuthAccountSelection(provider)) return false;
+		return authStorage.pinSessionOAuthAccount(provider, this.sessionId, credentialId);
 	}
 
 	/**

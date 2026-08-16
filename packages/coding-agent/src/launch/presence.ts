@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEisdir, isEnoent, postmortem } from "@oh-my-pi/pi-utils";
+import { captureProcessIdentity, inspectProcessIdentity, isEisdir, isEnoent, postmortem } from "@oh-my-pi/pi-utils";
 import { daemonRuntimeDir } from "./paths";
 
 const CLIENTS_DIR = "clients";
@@ -29,9 +29,21 @@ export async function registerDaemonProjectPresence(
 	const runtimeDir = runtimeOverride ?? daemonRuntimeDir(canonical);
 	const clientsDir = path.join(runtimeDir, CLIENTS_DIR);
 	await fs.mkdir(clientsDir, { recursive: true, mode: 0o700 });
+	const captured = await captureProcessIdentity(process.pid);
+	if (!captured.identity || captured.status !== "matched") {
+		throw new Error(`Unable to establish verified daemon presence identity (${captured.status})`);
+	}
 	const id = `${process.pid}-${crypto.randomUUID()}`;
 	const presencePath = path.join(clientsDir, `${id}.json`);
-	await Bun.write(presencePath, JSON.stringify({ pid: process.pid, id, projectDir: canonical }));
+	await Bun.write(
+		presencePath,
+		JSON.stringify({
+			pid: captured.identity.pid,
+			startToken: captured.identity.startToken,
+			id,
+			projectDir: canonical,
+		}),
+	);
 	await fs.chmod(presencePath, 0o600);
 	let closed = false;
 	const close = async (): Promise<void> => {
@@ -63,19 +75,23 @@ export async function hasLiveDaemonProjectPresence(runtimeDir: string): Promise<
 				typeof decoded !== "object" ||
 				decoded === null ||
 				!("pid" in decoded) ||
-				typeof decoded.pid !== "number"
+				typeof decoded.pid !== "number" ||
+				!("startToken" in decoded) ||
+				typeof decoded.startToken !== "string"
 			) {
-				await fs.rm(presencePath, { force: true });
+				live = true;
 				continue;
 			}
-			try {
-				process.kill(decoded.pid, 0);
+			const inspection = await inspectProcessIdentity({ pid: decoded.pid, startToken: decoded.startToken });
+			if (inspection.status === "matched") {
 				live = true;
-			} catch {
+			} else if (inspection.status === "dead") {
 				await fs.rm(presencePath, { force: true });
+			} else {
+				live = true;
 			}
 		} catch (error) {
-			if (!isEnoent(error)) await fs.rm(presencePath, { force: true });
+			if (!isEnoent(error)) live = true;
 		}
 	}
 	return live;

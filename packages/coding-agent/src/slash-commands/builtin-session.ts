@@ -2,6 +2,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
+import { GLOBAL_ACCOUNT_LOCK_SESSION_PIN_MESSAGE } from "../session/credential-pin";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -76,6 +77,10 @@ async function handleSessionPinCommand(
 ): Promise<void> {
 	if (session.isStreaming) {
 		await output("Cannot pin an account while the session is streaming.");
+		return;
+	}
+	if (session.model && session.modelRegistry.authStorage.getOAuthAccountSelection(session.model.provider)) {
+		await output(GLOBAL_ACCOUNT_LOCK_SESSION_PIN_MESSAGE);
 		return;
 	}
 	let accountList: SessionOAuthAccountList | undefined;

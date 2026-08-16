@@ -55,8 +55,9 @@ async function main() {
 	rl.on("line", async line => {
 		if (isWaiting) return;
 		if (line.trim() === "exit") {
-			client.stop();
-			process.exit(0);
+			rl.close();
+			await client.stop();
+			return;
 		}
 
 		isWaiting = true;
@@ -66,13 +67,13 @@ async function main() {
 		prompt();
 	});
 
-	rl.on("SIGINT", () => {
+	rl.on("SIGINT", async () => {
 		if (isWaiting) {
 			console.log("\n[Aborting...]");
-			client.abort();
+			await client.abort();
 		} else {
-			client.stop();
-			process.exit(0);
+			rl.close();
+			await client.stop();
 		}
 	});
 

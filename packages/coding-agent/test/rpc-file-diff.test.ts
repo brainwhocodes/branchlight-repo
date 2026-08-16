@@ -68,6 +68,28 @@ describe("getRpcFileDiff", () => {
 		await expect(getRpcFileDiff(repository, "../outside.txt")).rejects.toThrow("outside the workspace");
 	});
 
+	it("accepts an absolute target expressed through a symlinked workspace path", async () => {
+		const repository = await createRepository();
+		await fs.writeFile(path.join(repository, "tracked.txt"), "changed through link\n", "utf8");
+		const linkedWorkspace = `${repository}-link`;
+		tempDirectories.push(linkedWorkspace);
+		await fs.symlink(repository, linkedWorkspace, "dir");
+
+		const result = await getRpcFileDiff(linkedWorkspace, path.join(linkedWorkspace, "tracked.txt"));
+
+		expect(result).toMatchObject({ status: "modified", additions: 1, deletions: 2 });
+	});
+
+	it("rejects a target that resolves through a workspace symlink to an outside path", async () => {
+		const repository = await createRepository();
+		const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-diff-outside-"));
+		tempDirectories.push(outside);
+		await fs.writeFile(path.join(outside, "outside.txt"), "outside\n", "utf8");
+		await fs.symlink(outside, path.join(repository, "escape"), "dir");
+
+		await expect(getRpcFileDiff(repository, "escape/outside.txt")).rejects.toThrow("outside the workspace");
+	});
+
 	it("caps rendered patch lines while preserving full change counts", async () => {
 		const repository = await createRepository();
 		const lines = Array.from({ length: 2_100 }, (_, index) => `line ${index}`).join("\n");

@@ -4,15 +4,20 @@
  * Spawns the agent in RPC mode and provides a typed API for all operations.
  */
 
-import { isPromise } from "node:util/types";
 import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
-import type { FileSink } from "bun";
+import type { OmpGrpcClientFrame, OmpGrpcServerFrame } from "@oh-my-pi/pi-grpc";
+import {
+	connectOmpGrpc,
+	generateOmpGrpcToken,
+	OMP_GRPC_MAX_MESSAGE_BYTES,
+	OMP_GRPC_PROTOCOL_VERSION,
+	waitForOmpGrpcBootstrapFile,
+} from "@oh-my-pi/pi-grpc";
+import { isRecord, ptree, TempDir } from "@oh-my-pi/pi-utils";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
-import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
 	RPC_MESSAGES_PAGE_STALE_ERROR,
@@ -146,16 +151,6 @@ function isRpcResponse(value: unknown): value is RpcResponse {
 	return true;
 }
 
-function supportsRpcProtocolV2(value: Record<string, unknown>): boolean {
-	return (
-		value.type === "ready" &&
-		Array.isArray(value.supportedProtocolVersions) &&
-		value.supportedProtocolVersions.includes(2) &&
-		value.maxFrameBytes === MAX_RPC_FRAME_BYTES &&
-		value.maxReassembledFrameBytes === MAX_RPC_REASSEMBLED_BYTES
-	);
-}
-
 function isAgentEvent(value: unknown): value is AgentEvent {
 	if (!isRecord(value)) return false;
 	const type = value.type;
@@ -244,8 +239,16 @@ function isPageFallbackError(error: unknown): boolean {
 // RPC Client
 // ============================================================================
 
+interface RpcGrpcConnection {
+	readonly frames: AsyncIterable<OmpGrpcServerFrame>;
+	send(frame: OmpGrpcClientFrame): Promise<void>;
+	close(): Promise<void>;
+}
+
 export class RpcClient {
 	#process: ptree.ChildProcess | null = null;
+	#connection: RpcGrpcConnection | null = null;
+	#tempDir: TempDir | null = null;
 	#reaping: Promise<void> | null = null;
 	#eventListeners: RpcEventListener[] = [];
 	#sessionEventListeners: RpcSessionEventListener[] = [];
@@ -253,12 +256,13 @@ export class RpcClient {
 	#subagentProgressListeners = new Set<RpcSubagentProgressListener>();
 	#subagentEventListeners = new Set<RpcSubagentEventListener>();
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
-	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
-		new Map();
+	#pendingRequests: Map<
+		string,
+		{ command: string; resolve: (response: RpcResponse) => void; reject: (error: Error) => void }
+	> = new Map();
 	#customTools: RpcClientCustomTool[] = [];
 	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
 	#requestId = 0;
-	#protocolVersion: RpcProtocolVersion = 1;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
 	#abortController = new AbortController();
 
@@ -269,10 +273,9 @@ export class RpcClient {
 	/**
 	 * Start the RPC agent process.
 	 *
-	 * Safe to call again after {@link stop} on the same instance: a fresh
-	 * {@link AbortController} is minted for each start, and any failure after
-	 * the child spawn kills the child and clears internal state so callers may
-	 * retry without leaking processes.
+	 * Safe to call again after {@link stop} on the same instance. A failed
+	 * startup closes the transport, reaps the child, and removes its bootstrap
+	 * directory before returning.
 	 */
 	async start(): Promise<void> {
 		await this.#reaping;
@@ -280,10 +283,10 @@ export class RpcClient {
 			throw new Error("Client already started");
 		}
 
-		// Mint a fresh controller so a previous stop()'s abort does not
-		// short-circuit the new stdout reader (issue #4079).
 		this.#abortController = new AbortController();
-		this.#protocolVersion = 1;
+		const tempDir = await TempDir.create("@omp-rpc-client-");
+		const readyFile = tempDir.join("bootstrap.json");
+		const token = generateOmpGrpcToken();
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
 		const args = ["--mode", "rpc"];
@@ -301,136 +304,87 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		const child = ptree.spawn(["bun", cliPath, ...args], {
-			cwd: this.options.cwd,
-			env: { ...Bun.env, ...this.options.env },
-			stdin: "pipe",
-		});
+		let child: ptree.ChildProcess;
+		try {
+			child = ptree.spawn(["bun", cliPath, ...args], {
+				cwd: this.options.cwd,
+				env: {
+					...Bun.env,
+					...this.options.env,
+					OMP_GRPC_HOST: "127.0.0.1",
+					OMP_GRPC_PORT: "0",
+					OMP_GRPC_TOKEN: token,
+					OMP_GRPC_READY_FILE: readyFile,
+				},
+				stdin: "ignore",
+			});
+		} catch (error) {
+			await tempDir.remove().catch(() => {});
+			throw error;
+		}
 		this.#process = child;
+		this.#tempDir = tempDir;
 
-		// Wait for the "ready" signal or process exit
-		const { promise: readyPromise, resolve: readyResolve, reject: readyReject } = Promise.withResolvers<void>();
-		let readySettled = false;
-		let protocolV2Supported = false;
-		let protocolV2Enabled = false;
-		const frameDecoder = new RpcFrameDecoder();
-
-		const reapAfterOutputFailure = async (error: Error) => {
-			if (this.#process !== child) return;
-
-			this.#process = null;
-			this.#abortController.abort(error);
-			const pendingRequests = Array.from(this.#pendingRequests.values());
-			this.#pendingRequests.clear();
-			for (const pendingCall of this.#pendingHostToolCalls.values()) pendingCall.controller.abort(error);
-			this.#pendingHostToolCalls.clear();
-
-			try {
-				child.kill();
-			} catch {
-				// The process may already have exited.
-			}
-			await this.#waitForExit(child);
-			for (const request of pendingRequests) request.reject(error);
-		};
-
-		// Process lines in background, intercepting the ready signal.
-		const lines = readJsonl(child.stdout, this.#abortController.signal);
-		void (async () => {
-			for await (const line of lines) {
-				if (!readySettled && isRecord(line) && line.type === "ready") {
-					protocolV2Supported = supportsRpcProtocolV2(line);
-					readySettled = true;
-					readyResolve();
-					continue;
-				}
-				if (isRecord(line) && line.type === "rpc_chunk" && !protocolV2Enabled)
-					throw new Error("RPC chunk received before protocol negotiation");
-				const decoded = frameDecoder.push(line);
-				if (decoded) this.#handleLine(decoded);
-			}
-			// A closed stdout is terminal even if the child remains alive. Startup
-			// failures are reaped by the readyPromise catch below; established
-			// workers are reaped here so pending requests cannot hang indefinitely.
-			if (!readySettled) {
-				readySettled = true;
-				readyReject(new Error(`Agent output stream ended before ready. Stderr: ${child.peekStderr()}`));
-				return;
-			}
-			const exitResult = await Promise.race([
-				child.exited.then(
-					exitCode => ({ exitCode }),
-					cause => ({ cause }),
-				),
-				Bun.sleep(100).then(() => null),
-			]);
-			const error =
-				exitResult === null
-					? new Error(`Agent output stream ended unexpectedly. Stderr: ${child.peekStderr()}`)
-					: "exitCode" in exitResult
-						? new Error(`Agent process exited with code ${exitResult.exitCode}. Stderr: ${child.peekStderr()}`)
-						: new Error(`Agent output stream ended. Stderr: ${child.peekStderr()}`, {
-								cause: exitResult.cause,
-							});
-			await reapAfterOutputFailure(error);
-		})().catch(async (cause: unknown) => {
-			const error = cause instanceof Error ? cause : new Error(String(cause));
-			if (!readySettled) {
-				readySettled = true;
-				readyReject(error);
-				return;
-			}
-			await reapAfterOutputFailure(new Error(`Agent output reader failed: ${error.message}`, { cause: error }));
-		});
-
-		// Also race against process exit (in case stdout closes before we read it)
-		void child.exited.then(
-			(exitCode: number) => {
-				if (readySettled) return;
-				readySettled = true;
-				readyReject(new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`));
+		const exitedBeforeReady = child.exited.then<never>(
+			exitCode => {
+				throw new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`);
 			},
-			(err: Error) => {
-				// Killed or reaped without an exit code (e.g. stop() during
-				// startup); surface it instead of leaking an unhandled rejection.
-				if (readySettled) return;
-				readySettled = true;
-				readyReject(new Error(`Agent process exited before ready. Stderr: ${child.peekStderr()}`, { cause: err }));
+			cause => {
+				throw new Error(`Agent process exited before ready. Stderr: ${child.peekStderr()}`, { cause });
 			},
 		);
-
-		// Timeout to prevent hanging forever
-		const readyTimeout = this.#startTimeout(30000, () => {
-			if (readySettled) return;
-			readySettled = true;
-			readyReject(new Error(`Timeout waiting for agent to become ready. Stderr: ${child.peekStderr()}`));
+		const startupTimeout = Promise.withResolvers<never>();
+		const timeout = this.#startTimeout(30_000, () => {
+			startupTimeout.reject(new Error(`Timeout waiting for agent to become ready. Stderr: ${child.peekStderr()}`));
 		});
 
 		try {
-			await readyPromise;
-			if (protocolV2Supported) {
-				protocolV2Enabled = true;
-				const response = await this.#send({ type: "negotiate_protocol", protocolVersion: 2 });
-				if (
-					!response.success ||
-					response.command !== "negotiate_protocol" ||
-					!isRecord(response.data) ||
-					response.data.protocolVersion !== 2
-				)
-					throw new Error("RPC protocol v2 negotiation failed");
-				this.#protocolVersion = 2;
+			const bootstrap = await Promise.race([
+				waitForOmpGrpcBootstrapFile(readyFile, { signal: this.#abortController.signal }),
+				exitedBeforeReady,
+				startupTimeout.promise,
+			]);
+			const connection = await Promise.race([connectOmpGrpc(bootstrap), exitedBeforeReady, startupTimeout.promise]);
+			this.#connection = connection;
+			const iterator = connection.frames[Symbol.asyncIterator]();
+			const first = await Promise.race([iterator.next(), exitedBeforeReady, startupTimeout.promise]);
+			if (first.done || first.value.kind !== "ready") {
+				throw new Error("Agent gRPC stream ended before Ready");
 			}
+			if (
+				first.value.protocolVersion !== OMP_GRPC_PROTOCOL_VERSION ||
+				first.value.maxMessageBytes !== OMP_GRPC_MAX_MESSAGE_BYTES
+			) {
+				throw new Error("Agent reported an incompatible gRPC protocol");
+			}
+
+			void this.#readFrames(child, iterator);
+			void child.exited.then(
+				exitCode => {
+					if (this.#process !== child) return;
+					void this.#handleTransportFailure(
+						child,
+						new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`),
+					);
+				},
+				cause => {
+					if (this.#process !== child) return;
+					void this.#handleTransportFailure(
+						child,
+						new Error(`Agent process exited unexpectedly. Stderr: ${child.peekStderr()}`, { cause }),
+					);
+				},
+			);
+
 			if (this.#customTools.length > 0) {
 				await this.setCustomTools(this.#customTools);
 			}
 		} catch (cause) {
-			// Startup failed after spawning the child. Reap it before returning
-			// so a retry cannot inherit a live worker or its session lock.
 			const error = cause instanceof Error ? cause : new Error(String(cause));
-			await reapAfterOutputFailure(error);
-			throw cause;
+			await this.#handleTransportFailure(child, error);
+			throw error;
 		} finally {
-			clearTimeout(readyTimeout);
+			clearTimeout(timeout);
 		}
 	}
 
@@ -442,16 +396,10 @@ export class RpcClient {
 
 		const error = new Error("Client stopped");
 		const child = this.#process;
-		child.kill();
-		this.#abortController.abort(error);
 		this.#process = null;
-		for (const request of this.#pendingRequests.values()) request.reject(error);
-		this.#pendingRequests.clear();
-		for (const pendingCall of this.#pendingHostToolCalls.values()) {
-			pendingCall.controller.abort(error);
-		}
-		this.#pendingHostToolCalls.clear();
-		return this.#waitForExit(child);
+		this.#abortController.abort(error);
+		this.#rejectPending(error);
+		return this.#reap(child);
 	}
 
 	/**
@@ -461,11 +409,111 @@ export class RpcClient {
 		void this.stop();
 	}
 
-	#waitForExit(child: ptree.ChildProcess): Promise<void> {
-		const reaping = child.exited.then(
-			() => {},
-			() => {},
-		);
+	async #readFrames(child: ptree.ChildProcess, iterator: AsyncIterator<OmpGrpcServerFrame>): Promise<void> {
+		try {
+			for (;;) {
+				const next = await iterator.next();
+				if (next.done) {
+					throw new Error(`Agent gRPC stream ended unexpectedly. Stderr: ${child.peekStderr()}`);
+				}
+				if (next.value.kind === "ready") {
+					throw new Error("Agent sent duplicate Ready frame");
+				}
+				this.#handleServerFrame(next.value);
+			}
+		} catch (cause) {
+			if (this.#process !== child) return;
+			const error = cause instanceof Error ? cause : new Error(String(cause));
+			await this.#handleTransportFailure(
+				child,
+				new Error(`Agent gRPC reader failed: ${error.message}`, { cause: error }),
+			);
+		}
+	}
+
+	#handleServerFrame(frame: Exclude<OmpGrpcServerFrame, { kind: "ready" }>): void {
+		if (frame.kind === "response") {
+			this.#handleLine({
+				type: "response",
+				id: frame.id,
+				command: frame.command,
+				success: frame.success,
+				data: frame.data,
+				error: frame.error ?? (frame.success ? undefined : `RPC command ${frame.command} failed`),
+				code: frame.code,
+			});
+			return;
+		}
+		this.#handleLine({ ...frame.payload, type: frame.type });
+	}
+
+	async #handleTransportFailure(child: ptree.ChildProcess, error: Error): Promise<void> {
+		if (this.#process !== child) {
+			await this.#reaping;
+			return;
+		}
+		this.#process = null;
+		this.#abortController.abort(error);
+		this.#rejectPending(error);
+		await this.#reap(child);
+	}
+
+	#rejectPending(error: Error): void {
+		for (const request of this.#pendingRequests.values()) request.reject(error);
+		this.#pendingRequests.clear();
+		for (const pendingCall of this.#pendingHostToolCalls.values()) pendingCall.controller.abort(error);
+		this.#pendingHostToolCalls.clear();
+	}
+
+	#reap(child: ptree.ChildProcess): Promise<void> {
+		const connection = this.#connection;
+		const tempDir = this.#tempDir;
+		this.#connection = null;
+		this.#tempDir = null;
+		const reaping = (async () => {
+			let closing: Promise<void> | undefined;
+			try {
+				// Attach the rejection handler immediately: graceful shutdown
+				// may spend several seconds waiting for the child to exit.
+				closing = connection?.close().catch(() => {});
+			} catch {
+				// The peer may already have closed the HTTP/2 session.
+			}
+
+			if (connection) {
+				const grace = Promise.withResolvers<boolean>();
+				const graceTimer = setTimeout(() => grace.resolve(false), 5_000);
+				const exitedGracefully = await Promise.race([
+					child.exited.then(
+						() => true,
+						() => true,
+					),
+					grace.promise,
+				]);
+				clearTimeout(graceTimer);
+				if (!exitedGracefully) {
+					try {
+						child.kill();
+					} catch {
+						// The process may have exited as the grace period elapsed.
+					}
+				}
+			} else {
+				try {
+					child.kill();
+				} catch {
+					// The process may already have exited.
+				}
+			}
+			await child.exited.catch(() => {});
+			if (closing) {
+				const closeGrace = Promise.withResolvers<void>();
+				const closeTimer = setTimeout(() => closeGrace.resolve(), 1_000);
+				await Promise.race([closing, closeGrace.promise]);
+				clearTimeout(closeTimer);
+			}
+			await tempDir?.remove().catch(() => {});
+		})();
 		this.#reaping = reaping;
 		void reaping.then(() => {
 			if (this.#reaping === reaping) this.#reaping = null;
@@ -845,34 +893,32 @@ export class RpcClient {
 		return this.#getData<RpcMessagesPage>(response);
 	}
 
-	/** Get all messages, draining stable pages when protocol v2 is available. */
+	/** Get all messages, draining stable pages and falling back to a live snapshot if paging races session mutation. */
 	async getMessages(): Promise<AgentMessage[]> {
-		if (this.#protocolVersion === 2) {
-			try {
-				const messages: AgentMessage[] = [];
-				const seenCursors = new Set<string>();
-				let totalMessages: number | undefined;
-				let cursor: string | undefined;
-				do {
-					const page = await this.getMessagesPage({ cursor, limit: 256 });
-					if (
-						!Number.isSafeInteger(page.totalMessages) ||
-						page.totalMessages < 0 ||
-						(totalMessages !== undefined && page.totalMessages !== totalMessages)
-					)
-						throw new Error("RPC message pagination returned an inconsistent total");
-					totalMessages = page.totalMessages;
-					messages.push(...page.messages);
-					cursor = page.nextCursor;
-					if (cursor && seenCursors.has(cursor)) throw new Error("RPC message pagination repeated a cursor");
-					if (cursor) seenCursors.add(cursor);
-				} while (cursor);
-				if (messages.length !== totalMessages)
-					throw new Error("RPC message pagination ended before the advertised total");
-				return messages;
-			} catch (error) {
-				if (!isPageFallbackError(error)) throw error;
-			}
+		try {
+			const messages: AgentMessage[] = [];
+			const seenCursors = new Set<string>();
+			let totalMessages: number | undefined;
+			let cursor: string | undefined;
+			do {
+				const page = await this.getMessagesPage({ cursor, limit: 256 });
+				if (
+					!Number.isSafeInteger(page.totalMessages) ||
+					page.totalMessages < 0 ||
+					(totalMessages !== undefined && page.totalMessages !== totalMessages)
+				)
+					throw new Error("RPC message pagination returned an inconsistent total");
+				totalMessages = page.totalMessages;
+				messages.push(...page.messages);
+				cursor = page.nextCursor;
+				if (cursor && seenCursors.has(cursor)) throw new Error("RPC message pagination repeated a cursor");
+				if (cursor) seenCursors.add(cursor);
+			} while (cursor);
+			if (messages.length !== totalMessages)
+				throw new Error("RPC message pagination ended before the advertised total");
+			return messages;
+		} catch (error) {
+			if (!isPageFallbackError(error)) throw error;
 		}
 		const response = await this.#send({ type: "get_messages" });
 		return this.#getData<{ messages: AgentMessage[] }>(response).messages;
@@ -1037,11 +1083,21 @@ export class RpcClient {
 		// Check if it's a response to a pending request
 		if (isRpcResponse(data)) {
 			const id = data.id;
-			if (id && this.#pendingRequests.has(id)) {
-				const pending = this.#pendingRequests.get(id)!;
-				this.#pendingRequests.delete(id);
-				pending.resolve(data);
-				return;
+			if (id) {
+				const pending = this.#pendingRequests.get(id);
+				if (pending) {
+					this.#pendingRequests.delete(id);
+					if (data.command !== pending.command) {
+						pending.reject(
+							new Error(
+								`OMP gRPC response command mismatch for ${id}: expected ${pending.command}, received ${data.command}`,
+							),
+						);
+						return;
+					}
+					pending.resolve(data);
+					return;
+				}
 			}
 		}
 
@@ -1104,24 +1160,25 @@ export class RpcClient {
 	}
 
 	#send(command: RpcCommandBody, timeoutMs = 30_000): Promise<RpcResponse> {
-		if (!this.#process?.stdin) {
+		const connection = this.#connection;
+		const child = this.#process;
+		if (!connection || !child) {
 			throw new Error("Client not started");
 		}
 
 		const id = `req_${++this.#requestId}`;
-		const fullCommand = { ...command, id } as RpcCommand;
+		const { type, ...payload } = command;
 		const { promise, resolve, reject } = Promise.withResolvers<RpcResponse>();
 		let settled = false;
 		const timeoutId = this.#startTimeout(timeoutMs, () => {
 			if (settled) return;
 			this.#pendingRequests.delete(id);
 			settled = true;
-			reject(
-				new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.#process?.peekStderr() ?? ""}`),
-			);
+			reject(new Error(`Timeout waiting for response to ${type}. Stderr: ${this.#process?.peekStderr() ?? ""}`));
 		});
 
 		this.#pendingRequests.set(id, {
+			command: type,
 			resolve: response => {
 				if (settled) return;
 				settled = true;
@@ -1136,12 +1193,15 @@ export class RpcClient {
 			},
 		});
 
-		this.#writeFrame(fullCommand, err => {
+		void connection.send({ kind: "command", command: { id, command: type, payload } }).catch(cause => {
+			const error = cause instanceof Error ? cause : new Error(String(cause));
 			this.#pendingRequests.delete(id);
-			if (settled) return;
-			settled = true;
-			clearTimeout(timeoutId);
-			reject(err);
+			if (!settled) {
+				settled = true;
+				clearTimeout(timeoutId);
+				reject(error);
+			}
+			void this.#handleTransportFailure(child, error);
 		});
 		return promise;
 	}
@@ -1202,20 +1262,20 @@ export class RpcClient {
 	}
 
 	#writeFrame(
-		frame: RpcCommand | RpcExtensionUIResponse | RpcHostToolResult | RpcHostToolUpdate,
+		frame: RpcExtensionUIResponse | RpcHostToolResult | RpcHostToolUpdate,
 		onError?: (error: Error) => void,
 	): void {
-		if (!this.#process?.stdin) {
+		const connection = this.#connection;
+		const child = this.#process;
+		if (!connection || !child) {
 			throw new Error("Client not started");
 		}
-		const stdin = this.#process.stdin as FileSink;
-		stdin.write(`${JSON.stringify(frame)}\n`);
-		const flushResult = stdin.flush();
-		if (isPromise(flushResult)) {
-			flushResult.catch((err: Error) => {
-				onError?.(err);
-			});
-		}
+		const { type, ...payload } = frame;
+		void connection.send({ kind: "push", type, payload }).catch(cause => {
+			const error = cause instanceof Error ? cause : new Error(String(cause));
+			onError?.(error);
+			void this.#handleTransportFailure(child, error);
+		});
 	}
 
 	#getData<T>(response: RpcResponse): T {

@@ -17,6 +17,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { createSessionManager, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { credentialPinHash } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
 import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import * as sessionListingModule from "@oh-my-pi/pi-coding-agent/session/session-listing";
@@ -54,6 +55,26 @@ function buildGlobalMatch(cwd: string): { session: SessionInfo; scope: "global" 
 }
 
 const stubSettings = { get: () => undefined } as unknown as Settings;
+
+function oauthCredential(suffix: string) {
+	return {
+		type: "oauth" as const,
+		access: `access-${suffix}`,
+		refresh: `refresh-${suffix}`,
+		expires: Date.now() + 60_000,
+		accountId: `account-${suffix}`,
+		email: `${suffix}@example.com`,
+	};
+}
+
+function accountHash(suffix: string): string {
+	const hash = credentialPinHash("anthropic", {
+		accountId: `account-${suffix}`,
+		email: `${suffix}@example.com`,
+	});
+	if (!hash) throw new Error(`Expected a persistent hash for ${suffix}`);
+	return hash;
+}
 
 describe("createSessionManager — cross-project --resume", () => {
 	let existingProject: string;
@@ -182,24 +203,56 @@ describe("runRootCommand — cross-project --resume", () => {
 		expect(preloadedDestinationAtCreation).toBe(true);
 	}, 15_000);
 
-	it("re-resolves the model scope from the resumed project's enabledModels after the switch", async () => {
+	it("replaces the launch account lock before resolving the resumed project's model scope", async () => {
 		const match = buildGlobalMatch(resumedProject);
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(match);
-		// enabledModels scoped only to the resumed project: the launch scope
-		// yields no patterns, so any resolveModelScope call proves the recompute
-		// ran against the destination settings rather than the launch directory.
+		// enabledModels is scoped only to the destination. The launch resolution
+		// therefore avoids resolveModelScope, leaving its first invocation as the
+		// request-capable boundary immediately after the cross-project reload.
 		const settings = Settings.isolated({
 			"marketplace.autoUpdate": "off",
-			enabledModels: [{ paths: [resumedProject], models: ["model-resumed"] }],
+			"providers.oauthAccountLocks": { anthropic: accountHash("launch") },
+			"providers.oauthAccountFailover": false,
 		});
-		const resolveModelScope = vi.spyOn(modelResolverModule, "resolveModelScope").mockResolvedValue([]);
 		const authStorage = await AuthStorage.create(path.join(root, "auth.db"));
+		await authStorage.set("anthropic", [oauthCredential("launch"), oauthCredential("destination")]);
+		const launchAccount = authStorage
+			.listStoredOAuthAccounts("anthropic")
+			.find(account => account.accountId === "account-launch");
+		const destinationAccount = authStorage
+			.listStoredOAuthAccounts("anthropic")
+			.find(account => account.accountId === "account-destination");
+		const reloadForCwd = vi.spyOn(settings, "reloadForCwd").mockImplementation(async cwd => {
+			expect(cwd).toBe(resumedProject);
+			expect(authStorage.getOAuthAccountSelection("anthropic")).toEqual({
+				identityHash: accountHash("launch"),
+				credentialId: launchAccount?.credentialId,
+				available: true,
+				allowSiblingFailover: false,
+			});
+			settings.override("providers.oauthAccountLocks", { anthropic: accountHash("destination") });
+			settings.override("providers.oauthAccountFailover", true);
+			settings.override("enabledModels", ["model-resumed"]);
+		});
+		const resolveModelScope = vi
+			.spyOn(modelResolverModule, "resolveModelScope")
+			.mockImplementation(async patterns => {
+				expect(patterns).toEqual(["model-resumed"]);
+				expect(authStorage.getOAuthAccountSelection("anthropic")).toEqual({
+					identityHash: accountHash("destination"),
+					credentialId: destinationAccount?.credentialId,
+					available: true,
+					allowSiblingFailover: true,
+				});
+				return [];
+			});
 		const parsed = parseArgs(["--resume", "019e84ed", "--print"]);
 		parsed.noExtensions = true;
 		parsed.noSkills = true;
 		parsed.noRules = true;
 		parsed.noTools = true;
 		parsed.noLsp = true;
+		const stopAfterOrderingAssertion = new Error("stop after destination policy assertion");
 		let resumedManager: SessionManager | undefined;
 
 		try {
@@ -209,20 +262,18 @@ describe("runRootCommand — cross-project --resume", () => {
 				createAgentSession: async options => {
 					if (!options) throw new Error("Expected session options");
 					resumedManager = options.sessionManager;
-					throw new Error("stop after session options");
+					throw stopAfterOrderingAssertion;
 				},
 			});
 		} catch (error) {
-			if (!(error instanceof Error) || error.message !== "stop after session options") throw error;
+			if (error !== stopAfterOrderingAssertion) throw error;
 		} finally {
 			authStorage.close();
 			await resumedManager?.close();
 		}
 
-		// Launch scope had no patterns, so the only resolution is the post-switch
-		// one; the pre-fix code never recomputed and would not call it at all.
+		expect(reloadForCwd).toHaveBeenCalledTimes(1);
 		expect(resolveModelScope).toHaveBeenCalledTimes(1);
-		expect(resolveModelScope.mock.calls[0]?.[0]).toEqual(["model-resumed"]);
 	}, 15_000);
 });
 

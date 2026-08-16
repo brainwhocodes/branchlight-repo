@@ -1,19 +1,23 @@
 /**
- * RPC mode: Headless operation with JSON stdin/stdout protocol.
+ * RPC mode: headless operation over an authenticated gRPC bidirectional stream.
  *
- * Used for embedding the agent in other applications.
- * Receives commands as JSON on stdin, outputs events and responses as JSON on stdout.
- *
- * Protocol:
- * - Commands: JSON objects with `type` field, optional `id` for correlation
- * - Responses: JSON objects with `type: "response"`, `command`, `success`, and optional `data`/`error`
- * - Events: AgentSessionEvent objects streamed as they occur
- * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
+ * Application commands, responses, events, and extension side channels retain
+ * their existing object shapes; gRPC owns transport framing and correlation
+ * metadata.
  */
-import { once } from "node:events";
+
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	listenOmpGrpc,
+	OMP_GRPC_MAX_MESSAGE_BYTES,
+	OMP_GRPC_PROTOCOL_VERSION,
+	type OmpGrpcClientFrame,
+	type OmpGrpcServerConnection,
+	type OmpGrpcServerFrame,
+	writeOmpGrpcBootstrapFile,
+} from "@oh-my-pi/pi-grpc";
+import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -27,6 +31,7 @@ import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibili
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
+import { credentialPinHash, installOAuthAccountSelectionFromSettings } from "../../session/credential-pin";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
@@ -37,8 +42,6 @@ import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { getRpcFileDiff } from "./rpc-file-diff";
-import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
-import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { getRpcOpenRouterModelRouting, setRpcOpenRouterProviderEnabled } from "./rpc-openrouter-routing";
 import { getRpcSettings, setRpcSetting } from "./rpc-settings";
@@ -55,6 +58,8 @@ import type {
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
 	RpcHostUriResult,
+	RpcOAuthAccounts,
+	RpcOAuthProvider,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
@@ -253,10 +258,10 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 }
 
 /**
- * Dependencies for {@link dispatchRpcInputFrame}. Provided by the RPC mode
- * entrypoint; broken out so tests can drive the input loop with stubs.
+ * Dependencies for {@link dispatchRpcCommand}. Provided by the RPC mode
+ * entrypoint; broken out so tests can drive dispatch with stubs.
  */
-export interface RpcInputFrameDeps {
+export interface RpcCommandDeps {
 	handleCommand: (command: RpcCommand) => Promise<RpcResponse>;
 	output: RpcOutput;
 	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
@@ -268,7 +273,7 @@ export interface RpcInputFrameDeps {
 }
 
 /**
- * Structural guard for a well-formed extension UI response frame. Mirrors the
+ * Structural guard for a well-formed extension UI response push. Mirrors the
  * shape declared in {@link RpcExtensionUIResponse} — a truthy record with
  * `type === "extension_ui_response"` and a string `id`. Payload variants (value,
  * confirmed, cancelled) are validated at the read site.
@@ -278,8 +283,8 @@ function isRpcExtensionUIResponse(value: unknown): value is RpcExtensionUIRespon
 	return value.type === "extension_ui_response" && typeof value.id === "string";
 }
 
-/** Dispatch side-channel frames that must overtake the serialized command queue. */
-export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps): boolean {
+/** Dispatch side-channel pushes that must overtake the serialized command queue. */
+export function dispatchRpcControlPush(parsed: unknown, deps: RpcCommandDeps): boolean {
 	if (isRpcExtensionUIResponse(parsed)) {
 		const pending = deps.pendingExtensionRequests.get(parsed.id);
 		if (pending) pending.resolve(parsed);
@@ -305,7 +310,7 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
 }
 
 /**
- * Dispatch a single parsed frame from the RPC input stream.
+ * Dispatch a single application object reconstructed from a gRPC client frame.
  *
  * Bash commands are dispatched in the background so the caller can keep reading
  * subsequent frames while a shell command is still running. This lets a client
@@ -313,24 +318,22 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
  * correlation is preserved via each command's `id`; ordering across concurrent
  * commands is not guaranteed and clients MUST match on `id`.
  *
- * @returns `undefined` when the frame was routed to a side-channel handler
- *   (extension UI response, host tool/URI frames) or dispatched in the
+ * @returns `undefined` when the object was routed to a side-channel handler
+ *   (extension UI response, host tool/URI pushes) or dispatched in the
  *   background (`bash`). Otherwise a promise that resolves once the response
- *   for the command has been emitted via `output`. Errors from `handleCommand`
- *   on non-`bash` commands propagate; the caller is expected to wrap them.
+ *   for the command has been emitted via `output`.
  */
-export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps): Promise<void> | undefined {
-	if (dispatchRpcControlFrame(parsed, deps)) return undefined;
-	// Regular RPC command. The transport contract states each remaining frame
-	// is an {@link RpcCommand}; `handleCommand`'s `default` arm surfaces
-	// unknown discriminants as an error response, so we do not shape-check
-	// the union here.
+export function dispatchRpcCommand(parsed: unknown, deps: RpcCommandDeps): Promise<void> | undefined {
+	if (dispatchRpcControlPush(parsed, deps)) return undefined;
+	// The gRPC contract ensures each remaining object represents an
+	// {@link RpcCommand}; `handleCommand`'s `default` arm surfaces unknown
+	// discriminants as an error response, so the union is not shape-checked here.
 	const command = parsed as RpcCommand;
 
 	// `bash` can run for a long time. Dispatch it in the background so a
-	// subsequent `abort_bash` frame can be read and handled without waiting
-	// for the shell command to finish on its own. The response is emitted
-	// when `handleCommand` resolves; clients correlate via `command.id`.
+	// subsequent `abort_bash` command can be handled without waiting for the
+	// shell command to finish on its own. The response is emitted when
+	// `handleCommand` resolves; clients correlate via `command.id`.
 	if (command.type === "bash") {
 		const task = (async () => {
 			try {
@@ -349,26 +352,26 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 	})();
 }
 
-/** Serializes ordinary RPC commands while allowing control frames to dispatch immediately. */
-export class RpcInputDispatcher {
+/** Serializes ordinary RPC commands while allowing control pushes to dispatch immediately. */
+export class RpcCommandDispatcher {
 	#tail: Promise<void> = Promise.resolve();
 	#tasks = new Set<Promise<void>>();
-	readonly #deps: RpcInputFrameDeps;
+	readonly #deps: RpcCommandDeps;
 	readonly #afterSerialCommand: (() => Promise<void>) | undefined;
 
-	constructor(options: { deps: RpcInputFrameDeps; afterSerialCommand?: () => Promise<void> }) {
+	constructor(options: { deps: RpcCommandDeps; afterSerialCommand?: () => Promise<void> }) {
 		this.#deps = options.deps;
 		this.#afterSerialCommand = options.afterSerialCommand;
 	}
 
-	/** Accept a parsed input frame without blocking the stdin reader. */
+	/** Accept an application object without blocking the gRPC stream reader. */
 	dispatch(parsed: unknown): void {
 		try {
-			if (dispatchRpcControlFrame(parsed, this.#deps)) return;
+			if (dispatchRpcControlPush(parsed, this.#deps)) return;
 
 			const command = parsed as RpcCommand;
 			if (command.type === "bash") {
-				dispatchRpcInputFrame(command, this.#deps);
+				dispatchRpcCommand(command, this.#deps);
 				return;
 			}
 
@@ -383,11 +386,11 @@ export class RpcInputDispatcher {
 			});
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err);
-			this.#deps.output(this.#deps.errorResponse(undefined, "parse", `Failed to parse command: ${message}`));
+			this.#deps.output(this.#deps.errorResponse(undefined, "command", `Failed to dispatch command: ${message}`));
 		}
 	}
 
-	/** Await every accepted serial command, including commands queued before EOF. */
+	/** Await every accepted serial command, including commands queued before disconnect. */
 	async drain(): Promise<void> {
 		while (this.#tasks.size > 0) {
 			await Promise.allSettled(Array.from(this.#tasks));
@@ -396,7 +399,7 @@ export class RpcInputDispatcher {
 
 	async #dispatchSerialCommand(command: RpcCommand): Promise<void> {
 		try {
-			const awaited = dispatchRpcInputFrame(command, this.#deps);
+			const awaited = dispatchRpcCommand(command, this.#deps);
 			if (awaited) await awaited;
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -408,16 +411,15 @@ export class RpcInputDispatcher {
 }
 
 /**
- * Coordinates deferred shutdown with in-flight background input tasks.
+ * Coordinates deferred shutdown with in-flight background commands.
  *
  * `pi.shutdown()` from an extension only *requests* shutdown; the process must
  * not exit while a background-dispatched command (`bash`, see
- * {@link dispatchRpcInputFrame}) still owes the client a response frame. The
- * coordinator tracks those tasks, re-checks the shutdown request whenever one
- * settles (covering a shutdown requested mid-bash with no follow-up client
- * frame), and drains every tracked task before invoking `performShutdown`.
- * The shutdown sequence is latched so concurrent triggers (input loop and
- * settling tasks) run it exactly once.
+ * {@link dispatchRpcCommand}) still owes the client a response. The coordinator
+ * tracks those tasks, re-checks the shutdown request whenever one settles
+ * (covering a shutdown requested mid-bash with no follow-up client command),
+ * and drains every tracked task before invoking `performShutdown`. The shutdown
+ * sequence is latched so concurrent triggers run it exactly once.
  */
 export class RpcShutdownCoordinator {
 	#tasks = new Set<Promise<void>>();
@@ -455,7 +457,7 @@ export class RpcShutdownCoordinator {
 
 	/**
 	 * If shutdown was requested, drain background tasks (so every owed
-	 * response frame is written) before running the shutdown sequence.
+	 * response is sent) before running the shutdown sequence.
 	 */
 	checkShutdownRequested(): Promise<void> {
 		if (!this.#shutdown) {
@@ -658,51 +660,122 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+/** Reconstruct the existing application object carried by a gRPC client frame. */
+export function rpcClientFrameToApplicationObject(frame: OmpGrpcClientFrame): RpcCommand | object {
+	if (frame.kind === "command") {
+		return {
+			...frame.command.payload,
+			...(frame.command.id === undefined ? {} : { id: frame.command.id }),
+			type: frame.command.command,
+		} as RpcCommand;
+	}
+	return { ...frame.payload, type: frame.type };
+}
+
+/** Move transport metadata out of an existing application response or push. */
+export function rpcApplicationObjectToServerFrame(value: object): OmpGrpcServerFrame {
+	if (!isRecord(value) || typeof value.type !== "string") {
+		throw new Error("RPC output must be an object with a string type");
+	}
+	if (value.type === "response") {
+		if (typeof value.command !== "string" || typeof value.success !== "boolean") {
+			throw new Error("RPC response is missing command or success metadata");
+		}
+		return {
+			kind: "response",
+			...(typeof value.id === "string" ? { id: value.id } : {}),
+			command: value.command,
+			success: value.success,
+			...("data" in value ? { data: value.data } : {}),
+			...(typeof value.error === "string" ? { error: value.error } : {}),
+			...(typeof value.code === "string" ? { code: value.code } : {}),
+		};
+	}
+	const { type, ...payload } = value;
+	return { kind: "push", type, payload };
+}
+
+/** FIFO writer for a gRPC stream; application event producers remain synchronous. */
+export class RpcGrpcOutput {
+	#tail: Promise<void> = Promise.resolve();
+	readonly #connection: OmpGrpcServerConnection;
+
+	constructor(connection: OmpGrpcServerConnection) {
+		this.#connection = connection;
+	}
+
+	sendFrame(frame: OmpGrpcServerFrame): void {
+		this.#tail = this.#tail.then(() => this.#connection.send(frame)).catch(() => {});
+	}
+
+	output(value: object): void {
+		this.sendFrame(rpcApplicationObjectToServerFrame(value));
+	}
+
+	async drain(): Promise<void> {
+		await this.#tail;
+	}
+}
+
+/** Consume one authenticated Connect stream and perform disconnect cleanup. */
+export async function serveRpcConnection(
+	connection: OmpGrpcServerConnection,
+	options: {
+		deps: RpcCommandDeps;
+		afterSerialCommand?: () => Promise<void>;
+		onDisconnect: () => void | Promise<void>;
+	},
+): Promise<void> {
+	const dispatcher = new RpcCommandDispatcher({
+		deps: options.deps,
+		afterSerialCommand: options.afterSerialCommand,
+	});
+	try {
+		for await (const frame of connection.frames) {
+			dispatcher.dispatch(rpcClientFrameToApplicationObject(frame));
+		}
+	} finally {
+		await options.onDisconnect();
+		await dispatcher.drain();
+	}
+}
+
 /**
- * Run in RPC mode.
- * Listens for JSON commands on stdin, outputs events and responses on stdout.
+ * Run in RPC mode over one authenticated loopback gRPC Connect stream.
  */
 export async function runRpcMode(
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	eventBus?: EventBus,
-	input: ReadableStream<Uint8Array> = claimRpcInput(),
 ): Promise<never> {
-	// Signal to RPC clients that the server is ready to accept commands
-	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
-	// process.stdout with no newline, which the reader merges with the next JSON line and
-	// breaks JSON.parse. In RPC mode stdout is the JSON protocol channel — nothing else
-	// may write there.
 	process.env.PI_NOTIFICATIONS = "off";
 
-	const frameEncoder = new RpcFrameEncoder();
-	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced
-	// lazily by the encoder and written one physical line at a time, so a near-limit
-	// logical frame never materializes its full base64 transport in memory.
-	let stdoutQueue: Promise<void> = Promise.resolve();
-	const writeFrames = (frames: Iterable<string>) => {
-		stdoutQueue = stdoutQueue
-			.then(async () => {
-				for (const line of frames) {
-					if (!process.stdout.write(line)) await once(process.stdout, "drain");
-				}
-			})
-			// stdout gone (host exited) — nothing left to deliver; keep the queue alive.
-			.catch(() => {});
-	};
-	writeFrames(
-		frameEncoder.encodeFrames({
-			type: "ready",
-			protocolVersion: 1,
-			supportedProtocolVersions: [1, 2],
-			maxFrameBytes: MAX_RPC_FRAME_BYTES,
-			maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
-		}),
-	);
+	const host = $env.OMP_GRPC_HOST ?? "127.0.0.1";
+	const portText = $env.OMP_GRPC_PORT ?? "0";
+	const port = Number.parseInt(portText, 10);
+	if (!Number.isInteger(port) || port < 0 || port > 65_535 || String(port) !== portText) {
+		throw new Error(`Invalid OMP_GRPC_PORT: ${portText}`);
+	}
+	const token = $env.OMP_GRPC_TOKEN;
+	if (!token) throw new Error("OMP_GRPC_TOKEN is required for RPC mode");
+
+	const server = await listenOmpGrpc({ host, port, token });
+	const readyFile = $env.OMP_GRPC_READY_FILE;
+	if (readyFile) {
+		await writeOmpGrpcBootstrapFile(readyFile, server.bootstrap);
+	} else {
+		process.stderr.write(`OMP gRPC listening on ${server.bootstrap.host}:${server.bootstrap.port}\n`);
+	}
+
+	const connection = await server.accept();
+	const grpcOutput = new RpcGrpcOutput(connection);
+	grpcOutput.sendFrame({
+		kind: "ready",
+		protocolVersion: OMP_GRPC_PROTOCOL_VERSION,
+		maxMessageBytes: OMP_GRPC_MAX_MESSAGE_BYTES,
+	});
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
-		writeFrames(frameEncoder.encodeFrames(obj));
-		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
-			frameEncoder.setProtocolVersion(2);
+		grpcOutput.output(obj);
 	};
 	const emitRpcTitles = shouldEmitRpcTitles();
 
@@ -719,6 +792,57 @@ export async function runRpcMode(
 
 	const error = (id: string | undefined, command: string, message: string, code?: string): RpcResponse => {
 		return { id, type: "response", command, success: false, error: message, ...(code ? { code } : {}) };
+	};
+	const readOAuthLockMap = (): Record<string, string> => {
+		const value: unknown = session.settings.get("providers.oauthAccountLocks");
+		if (!isRecord(value)) return {};
+		return Object.fromEntries(
+			Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+		);
+	};
+	const resolveOAuthProvider = (providerId: string): { loginId: string; storageId: string } | undefined => {
+		const provider = getOAuthProviders().find(
+			candidate => candidate.id === providerId || (candidate.storeCredentialsAs ?? candidate.id) === providerId,
+		);
+		if (!provider) return undefined;
+		return { loginId: provider.id, storageId: provider.storeCredentialsAs ?? provider.id };
+	};
+	const getOAuthAccounts = (): RpcOAuthAccounts => {
+		const locks = readOAuthLockMap();
+		const failover = session.settings.get("providers.oauthAccountFailover") === true;
+		const providers: RpcOAuthProvider[] = getOAuthProviders().map(provider => {
+			const storageId = provider.storeCredentialsAs ?? provider.id;
+			const accounts = session.modelRegistry.authStorage.listStoredOAuthAccounts(storageId, session.sessionId);
+			const hashes = accounts.map(account => credentialPinHash(storageId, account));
+			const counts = new Map<string, number>();
+			for (const hash of hashes) {
+				if (hash) counts.set(hash, (counts.get(hash) ?? 0) + 1);
+			}
+			const lockHash = locks[storageId];
+			const lockedRows = lockHash ? accounts.filter((_, index) => hashes[index] === lockHash) : [];
+			return {
+				id: provider.id,
+				name: provider.name,
+				available: provider.available,
+				failover,
+				...(lockedRows.length === 1 ? { lockedCredentialId: lockedRows[0]!.credentialId } : {}),
+				accounts: accounts.map((account, index) => {
+					const hash = hashes[index];
+					return {
+						credentialId: account.credentialId,
+						...(account.email ? { email: account.email } : {}),
+						...(account.accountId ? { accountId: account.accountId } : {}),
+						...(account.orgId ? { orgId: account.orgId } : {}),
+						...(account.orgName ? { orgName: account.orgName } : {}),
+						...(account.projectId ? { projectId: account.projectId } : {}),
+						active: account.active,
+						locked: lockHash !== undefined && hash === lockHash,
+						lockable: hash !== undefined && counts.get(hash) === 1,
+					};
+				}),
+			};
+		});
+		return { providers };
 	};
 
 	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
@@ -934,9 +1058,8 @@ export async function runRpcMode(
 		}
 	}
 
-	// Wire up UI context for tool execution (ask tool, etc.) and extensions.
-	// A single shared instance routes all responses received on stdin to the
-	// correct waiting promise regardless of which code path created the request.
+	// A single shared UI context routes every response push to the correct
+	// waiting promise regardless of which code path created the request.
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
 
@@ -985,12 +1108,6 @@ export async function runRpcMode(
 		const id = command.id;
 
 		switch (command.type) {
-			case "negotiate_protocol": {
-				if (command.protocolVersion !== 2)
-					return error(id, "negotiate_protocol", `Unsupported RPC protocol version: ${command.protocolVersion}`);
-				return success(id, "negotiate_protocol", { protocolVersion: 2 });
-			}
-
 			// =================================================================
 			// Prompting
 			// =================================================================
@@ -1082,6 +1199,7 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "get_state": {
+				const memory = process.memoryUsage();
 				const state: RpcSessionState = {
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
@@ -1109,6 +1227,14 @@ export async function runRpcMode(
 						examples: tool.examples,
 					})),
 					contextUsage: session.getContextUsage(),
+					runtime: {
+						pid: process.pid,
+						uptimeMs: process.uptime() * 1_000,
+						residentMemoryBytes: memory.rss,
+						heapUsedBytes: memory.heapUsed,
+						heapTotalBytes: memory.heapTotal,
+						externalMemoryBytes: memory.external,
+					},
 				};
 				return success(id, "get_state", state);
 			}
@@ -1424,6 +1550,73 @@ export async function runRpcMode(
 			// Login
 			// =================================================================
 
+			case "get_oauth_accounts": {
+				return success(id, "get_oauth_accounts", getOAuthAccounts());
+			}
+
+			case "set_oauth_account_lock": {
+				const resolved = resolveOAuthProvider(command.providerId);
+				if (!resolved) return error(id, "set_oauth_account_lock", `Unknown OAuth provider: ${command.providerId}`);
+				const accounts = session.modelRegistry.authStorage.listStoredOAuthAccounts(
+					resolved.storageId,
+					session.sessionId,
+				);
+				const locks = readOAuthLockMap();
+				delete locks[command.providerId];
+				if (command.credentialId !== undefined) {
+					const account = accounts.find(candidate => candidate.credentialId === command.credentialId);
+					if (!account) return error(id, "set_oauth_account_lock", "OAuth account not found");
+					const hash = credentialPinHash(resolved.storageId, account);
+					if (!hash) return error(id, "set_oauth_account_lock", "OAuth account has no lockable identity");
+					if (
+						accounts.filter(candidate => credentialPinHash(resolved.storageId, candidate) === hash).length !== 1
+					) {
+						return error(id, "set_oauth_account_lock", "OAuth account identity is ambiguous");
+					}
+					locks[resolved.storageId] = hash;
+				} else {
+					delete locks[resolved.storageId];
+				}
+				session.settings.set("providers.oauthAccountLocks", locks);
+				installOAuthAccountSelectionFromSettings(session.settings, session.modelRegistry.authStorage);
+				return success(id, "set_oauth_account_lock", getOAuthAccounts());
+			}
+
+			case "set_oauth_account_failover": {
+				session.settings.set("providers.oauthAccountFailover", command.enabled);
+				installOAuthAccountSelectionFromSettings(session.settings, session.modelRegistry.authStorage);
+				return success(id, "set_oauth_account_failover", getOAuthAccounts());
+			}
+
+			case "remove_oauth_account": {
+				const resolved = resolveOAuthProvider(command.providerId);
+				if (!resolved) return error(id, "remove_oauth_account", `Unknown OAuth provider: ${command.providerId}`);
+				const accounts = session.modelRegistry.authStorage.listStoredOAuthAccounts(
+					resolved.storageId,
+					session.sessionId,
+				);
+				const account = accounts.find(candidate => candidate.credentialId === command.credentialId);
+				if (!account) return error(id, "remove_oauth_account", "OAuth account not found");
+				try {
+					const removed = await session.modelRegistry.authStorage.removeCredential(
+						resolved.storageId,
+						command.credentialId,
+					);
+					if (!removed) return error(id, "remove_oauth_account", "OAuth account was not removed");
+					const locks = readOAuthLockMap();
+					const lockHash = locks[resolved.storageId];
+					if (lockHash && credentialPinHash(resolved.storageId, account) === lockHash) {
+						delete locks[resolved.storageId];
+						session.settings.set("providers.oauthAccountLocks", locks);
+					}
+					installOAuthAccountSelectionFromSettings(session.settings, session.modelRegistry.authStorage);
+					await session.modelRegistry.refreshProvider(resolved.loginId, "online");
+					return success(id, "remove_oauth_account", getOAuthAccounts());
+				} catch (err: unknown) {
+					return error(id, "remove_oauth_account", err instanceof Error ? err.message : String(err));
+				}
+			}
+
 			case "get_login_providers": {
 				const providers = getOAuthProviders().map(provider => ({
 					id: provider.id,
@@ -1509,7 +1702,7 @@ export async function runRpcMode(
 
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
 	// process while a background-dispatched bash still owes the client its
-	// response frame. The coordinator drains tracked tasks before exiting and
+	// response. The coordinator drains tracked tasks before exiting and
 	// re-checks the request as each task settles.
 	const shutdownCoordinator = new RpcShutdownCoordinator({
 		isShutdownRequested: () => shutdownState.requested,
@@ -1520,11 +1713,14 @@ export async function runRpcMode(
 			// must NOT emit it separately here or the event fires twice. Skipping
 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
 			await session.dispose();
+			await grpcOutput.drain();
+			await connection.close();
+			await server.close();
 			process.exit(0);
 		},
 	});
 
-	const dispatchFrameDeps: RpcInputFrameDeps = {
+	const commandDeps: RpcCommandDeps = {
 		handleCommand,
 		output,
 		errorResponse: error,
@@ -1535,44 +1731,22 @@ export async function runRpcMode(
 		onHostUriResult: frame => hostUriBridge.handleResult(frame),
 	};
 
-	const inputDispatcher = new RpcInputDispatcher({
-		deps: dispatchFrameDeps,
+	await serveRpcConnection(connection, {
+		deps: commandDeps,
 		afterSerialCommand: () => shutdownCoordinator.checkShutdownRequested(),
+		onDisconnect: () => {
+			pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
+			hostToolBridge.close("RPC client disconnected before host tool execution completed");
+			hostUriBridge.clear("RPC client disconnected before host URI request completed");
+		},
 	});
-
-	// Keep the stdin reader moving: side-channel frames dispatch immediately,
-	// ordinary commands serialize through inputDispatcher, and bash remains
-	// background-dispatched so abort_bash can overtake it. Frames are read
-	// line-by-line and parsed here (not via readJsonl) so a single malformed
-	// line is reported as an error frame and the loop keeps running instead of
-	// throwing out of the generator and killing the whole process (issue #5194).
-	const decoder = new TextDecoder();
-	for await (const line of readLines(input ?? Bun.stdin.stream())) {
-		const text = decoder.decode(line).trim();
-		if (!text) continue;
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(text);
-		} catch (e: unknown) {
-			const message = e instanceof Error ? e.message : String(e);
-			output(error(undefined, "parse", `Failed to parse command: ${message}`));
-			continue;
-		}
-		inputDispatcher.dispatch(parsed);
-	}
-
-	// stdin closed — RPC client is gone. Fail pending side-channel requests
-	// first so active/queued commands can settle, then drain accepted work.
-	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
-	hostToolBridge.close("RPC client disconnected before host tool execution completed");
-	hostUriBridge.clear("RPC client disconnected before host URI request completed");
-	await inputDispatcher.drain();
 	await shutdownCoordinator.drain();
 	subagentRegistry?.dispose();
 	// Dispose the main session before exiting so the browser reaper and other
-	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a
-	// prior pi.shutdown() through the coordinator makes this await settle
-	// immediately.
+	// bounded teardown run on the Connect-stream close path too (#5643).
 	await session.dispose();
+	await grpcOutput.drain();
+	await connection.close();
+	await server.close();
 	process.exit(0);
 }

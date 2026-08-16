@@ -60,6 +60,12 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		expect(state.isStreaming).toBe(false);
 		expect(state.messageCount).toBe(0);
 		expect(state.tokensPerSecond).toBeNull();
+		expect(state.runtime.pid).not.toBe(process.pid);
+		expect(state.runtime.uptimeMs).toBeGreaterThan(0);
+		expect(state.runtime.residentMemoryBytes).toBeGreaterThan(0);
+		expect(state.runtime.heapUsedBytes).toBeGreaterThan(0);
+		expect(state.runtime.heapTotalBytes).toBeGreaterThanOrEqual(state.runtime.heapUsedBytes);
+		expect(state.runtime.externalMemoryBytes).toBeGreaterThanOrEqual(0);
 	}, 30000);
 
 	test("should set fast mode and expose enabled/active state", async () => {

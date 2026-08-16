@@ -30,7 +30,7 @@ const ALWAYS_EXTERNAL = [
 // import would load the unpatched npm package in users' installs (currently
 // @ark/schema is patched, so it — and arktype, which pulls @ark/schema — stay
 // bundled).
-const RUNTIME_EXTERNAL = ["puppeteer-core", "@babel/parser"];
+const RUNTIME_EXTERNAL = ["playwright-core", "@babel/parser"];
 
 async function runCommand(command: string[]): Promise<void> {
 	const proc = Bun.spawn(command, {

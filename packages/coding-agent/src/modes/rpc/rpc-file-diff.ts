@@ -26,9 +26,10 @@ export async function getRpcFileDiff(
 	if (!target || target.length > 4_096) throw new TypeError("File diff path must contain 1–4096 characters");
 	if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target)) throw new TypeError("File diff path must reference the workspace");
 
-	const workspace = path.resolve(cwd);
-	const candidate = path.isAbsolute(target) ? path.normalize(target) : path.resolve(workspace, target);
-	assertInside(workspace, candidate);
+	const requestedWorkspace = path.resolve(cwd);
+	const workspace = await fs.realpath(requestedWorkspace).catch(() => requestedWorkspace);
+	const candidate = resolveWorkspaceTarget(requestedWorkspace, workspace, target);
+	await assertResolvedInside(workspace, candidate);
 
 	const repoRoot = await git.repo.root(workspace, signal);
 	if (!repoRoot) return unavailable(target, "This workspace is not inside a Git repository.");
@@ -93,10 +94,46 @@ export async function getRpcFileDiff(
 	};
 }
 
+function resolveWorkspaceTarget(requestedWorkspace: string, workspace: string, target: string): string {
+	if (!path.isAbsolute(target)) {
+		const candidate = path.resolve(workspace, target);
+		assertInside(workspace, candidate);
+		return candidate;
+	}
+
+	const candidate = path.normalize(target);
+	if (isInside(workspace, candidate)) return candidate;
+	const relative = path.relative(requestedWorkspace, candidate);
+	if (!isRelativeInside(relative)) throw new Error("File diff target is outside the workspace");
+	return path.resolve(workspace, relative);
+}
+
 function assertInside(root: string, target: string): void {
-	const relative = path.relative(root, target);
-	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-		throw new Error("File diff target is outside the workspace");
+	if (!isInside(root, target)) throw new Error("File diff target is outside the workspace");
+}
+
+function isInside(root: string, target: string): boolean {
+	return isRelativeInside(path.relative(root, target));
+}
+
+function isRelativeInside(relative: string): boolean {
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+async function assertResolvedInside(workspace: string, target: string): Promise<void> {
+	let existing = target;
+	for (;;) {
+		let resolved: string;
+		try {
+			resolved = await fs.realpath(existing);
+		} catch (error) {
+			const parent = path.dirname(existing);
+			if (parent === existing) throw error;
+			existing = parent;
+			continue;
+		}
+		assertInside(workspace, resolved);
+		return;
 	}
 }
 

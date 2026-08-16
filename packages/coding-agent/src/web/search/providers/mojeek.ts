@@ -1,7 +1,7 @@
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { parseHTML } from "@oh-my-pi/pi-utils/dom";
-import type { Page } from "puppeteer-core";
+import type { Page } from "playwright-core";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatScraperQuery, type QuerySyntax } from "../query";
@@ -123,7 +123,9 @@ async function solveCaptcha(page: Page, signal: AbortSignal): Promise<void> {
 	await untilAborted(signal, () => checkbox.click());
 	await untilAborted(signal, () => navigation);
 	await untilAborted(signal, () =>
-		page.waitForSelector("ul.results-standard li", { timeout: CAPTCHA_SOLVE_TIMEOUT_MS }).catch(() => null),
+		page
+			.waitForSelector("ul.results-standard li", { state: "attached", timeout: CAPTCHA_SOLVE_TIMEOUT_MS })
+			.catch(() => null),
 	);
 }
 

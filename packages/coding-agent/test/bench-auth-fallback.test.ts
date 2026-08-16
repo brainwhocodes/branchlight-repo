@@ -1,15 +1,21 @@
-import { describe, expect, it } from "bun:test";
-import type {
-	Api,
-	ApiKeyResolver,
-	AssistantMessage,
-	AssistantMessageEvent,
-	AssistantMessageEventStream,
-	Model,
-	SimpleStreamOptions,
+import { describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import {
+	type Api,
+	type ApiKeyResolver,
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	type AssistantMessageEventStream,
+	type Model,
+	type SimpleStreamOptions,
+	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
 import { type BenchModelRegistry, type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { credentialPinHash } from "@oh-my-pi/pi-coding-agent/session/credential-pin";
+import { getAgentDbPath, getProjectAgentDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { beginSettingsTest, restoreSettingsTestState } from "./helpers/settings-test-state";
 
 function fakeModel(provider: string, id: string): Model<Api> {
 	return {
@@ -283,5 +289,95 @@ describe("bench service tier", () => {
 		const { wire, summary } = await captureServiceTier({});
 		expect(wire).toBeUndefined();
 		expect(summary).toEqual({});
+	});
+});
+
+describe.serial("bench default runtime OAuth routing startup", () => {
+	it("installs persisted OAuth policy before the first runtime-provider refresh", async () => {
+		const settingsState = beginSettingsTest();
+		const projectTmp = await TempDir.create("@bench-oauth-startup-");
+		const agentTmp = await TempDir.create("@bench-oauth-startup-agent-");
+		setProjectDir(projectTmp.path());
+		setAgentDir(agentTmp.path());
+		const provider = "anthropic";
+		const selectedCredential = {
+			type: "oauth" as const,
+			access: "bench-selected-access",
+			refresh: "bench-selected-refresh",
+			expires: Date.now() + 3_600_000,
+			accountId: "bench-selected-account",
+			email: "bench-selected@example.com",
+		};
+		const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
+		let expectedCredentialId: number;
+		let identityHash: string;
+		try {
+			store.saveOAuth(provider, {
+				access: "bench-sibling-access",
+				refresh: "bench-sibling-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "bench-sibling-account",
+				email: "bench-sibling@example.com",
+			});
+			store.saveOAuth(provider, selectedCredential);
+			const selectedRow = store
+				.listAuthCredentials(provider)
+				.find(row => row.credential.type === "oauth" && row.credential.email === selectedCredential.email);
+			if (!selectedRow) throw new Error("Selected OAuth fixture row was not persisted");
+			expectedCredentialId = selectedRow.id;
+			const hash = credentialPinHash(provider, selectedCredential);
+			if (!hash) throw new Error("Selected OAuth fixture identity was not hashable");
+			identityHash = hash;
+		} finally {
+			store.close();
+		}
+		await Bun.write(
+			path.join(getProjectAgentDir(projectTmp.path()), "settings.json"),
+			JSON.stringify({
+				providers: {
+					oauthAccountLocks: { [provider]: identityHash },
+					oauthAccountFailover: true,
+				},
+			}),
+		);
+
+		const sentinel = new Error("bench-runtime-provider-refresh-policy");
+		const refreshSpy = vi
+			.spyOn(ModelRegistry.prototype, "refreshRuntimeProviders")
+			.mockImplementation(async function (this: ModelRegistry): Promise<void> {
+				expect(this.authStorage.listStoredOAuthAccounts(provider)).toHaveLength(2);
+				expect(this.authStorage.getOAuthAccountSelection(provider)).toEqual({
+					identityHash,
+					credentialId: expectedCredentialId,
+					available: true,
+					allowSiblingFailover: true,
+				});
+				const access = await this.authStorage.getOAuthAccess(provider, "bench-startup-policy");
+				expect(access).toMatchObject({
+					accessToken: "bench-selected-access",
+					credentialId: expectedCredentialId,
+				});
+				throw sentinel;
+			});
+		try {
+			await expect(
+				runBenchCommand(
+					{ models: ["anthropic/claude-sonnet-4-6"], flags: { runs: 1, maxTokens: 1, json: true } },
+					{
+						randomSessionId: () => "bench-startup-session",
+						writeStdout: () => {},
+						writeStderr: () => {},
+						setExitCode: () => {},
+						stdoutIsTTY: false,
+					},
+				),
+			).rejects.toBe(sentinel);
+			expect(refreshSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			refreshSpy.mockRestore();
+			restoreSettingsTestState(settingsState);
+			await projectTmp.remove();
+			await agentTmp.remove();
+		}
 	});
 });

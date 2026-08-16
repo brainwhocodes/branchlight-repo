@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { filterProcessEnv } from "@oh-my-pi/pi-utils/env";
+import { filterProcessEnv } from "@oh-my-pi/pi-utils/process-env";
 import { $which } from "@oh-my-pi/pi-utils/which";
 
 const DESKTOP_PACKAGE = path.join("packages", "desktop", "package.json");
