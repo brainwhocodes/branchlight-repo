@@ -135,7 +135,7 @@ cp "$natives_pkg_backup" "$ROOT_DIR/packages/natives/package.json"
 # 3. Pack the remaining workspace packages (natives core and coding-agent
 #    handled separately). `grpc` is packed before its coding-agent consumer.
 #    `collab-web` is private but packed to keep its prepack and file list safe.
-for pkg in utils grpc wire omptype hashline catalog ai mnemopi snapcompact agent tui stats collab-web; do
+for pkg in utils grpc wire browser-runtime omptype hashline catalog ai mnemopi snapcompact agent tui stats collab-web workspace-runtime; do
    (
       cd "$ROOT_DIR/packages/$pkg"
       bun pm pack --destination "$TARBALL_DIR" --quiet >/dev/null
@@ -161,6 +161,7 @@ cp "$agent_pkg_backup" "$ROOT_DIR/packages/coding-agent/package.json"
 utils_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-utils-*.tgz)"
 grpc_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-grpc-*.tgz)"
 wire_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-wire-*.tgz)"
+browser_runtime_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-browser-runtime-*.tgz)"
 omptype_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-omptype-*.tgz)"
 natives_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-natives-[0-9]*.tgz)"
 natives_leaf_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-natives-"$host_tag"-*.tgz)"
@@ -174,6 +175,7 @@ tui_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-tui-*.tgz)"
 stats_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-omp-stats-*.tgz)"
 coding_agent_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-coding-agent-*.tgz)"
 collab_web_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-collab-web-*.tgz)"
+workspace_runtime_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-workspace-runtime-*.tgz)"
 
 TARBALL_APP_DIR="$WORK_DIR/tarball-install"
 mkdir -p "$TARBALL_APP_DIR"
@@ -189,6 +191,7 @@ mkdir -p "$TARBALL_APP_DIR"
 			'@oh-my-pi/pi-utils': '$utils_tgz',
 			'@oh-my-pi/pi-grpc': '$grpc_tgz',
 			'@oh-my-pi/pi-wire': '$wire_tgz',
+			'@oh-my-pi/pi-browser-runtime': '$browser_runtime_tgz',
 			'@oh-my-pi/omptype': '$omptype_tgz',
 			'@oh-my-pi/pi-natives': '$natives_tgz',
 			'@oh-my-pi/pi-natives-$host_tag': '$natives_leaf_tgz',
@@ -201,12 +204,13 @@ mkdir -p "$TARBALL_APP_DIR"
 			'@oh-my-pi/pi-tui': '$tui_tgz',
 			'@oh-my-pi/omp-stats': '$stats_tgz',
 			'@oh-my-pi/pi-coding-agent': '$coding_agent_tgz',
-			'@oh-my-pi/collab-web': '$collab_web_tgz'
+			'@oh-my-pi/collab-web': '$collab_web_tgz',
+			'@oh-my-pi/pi-workspace-runtime': '$workspace_runtime_tgz'
 		};
 		require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
 	"
 
-   bun add "$utils_tgz" "$grpc_tgz" "$wire_tgz" "$omptype_tgz" "$natives_tgz" "$hashline_tgz" "$catalog_tgz" "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$collab_web_tgz"
+   bun add "$utils_tgz" "$grpc_tgz" "$wire_tgz" "$browser_runtime_tgz" "$omptype_tgz" "$natives_tgz" "$hashline_tgz" "$catalog_tgz" "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$collab_web_tgz" "$workspace_runtime_tgz"
    # The platform leaf must arrive through the core's optionalDependencies +
    # override, not as a direct dependency — assert it landed before smoking so a
    # resolution regression is distinguishable from a runtime loader bug.

@@ -1,10 +1,17 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ensureWorkspaceRuntime } from "@oh-my-pi/pi-workspace-runtime/bootstrap";
 import { WorkspaceClient } from "@oh-my-pi/pi-workspace-runtime/client";
 import { captureSanitizedUserEnvironment } from "@oh-my-pi/pi-workspace-runtime/env";
 import { WorkspaceServer } from "@oh-my-pi/pi-workspace-runtime/server";
+
+function resolveSourceRuntimeServerEntry(): string | undefined {
+	const execPath = process.execPath;
+	if (!execPath.endsWith("bun") && !execPath.endsWith("bun.exe")) return undefined;
+	return fileURLToPath(import.meta.resolve("@oh-my-pi/pi-workspace-runtime/cli"));
+}
 
 export async function startRuntimeServerFromEnvironment(): Promise<void> {
 	const bootstrapRuntimeDir = process.env.BRANCHLIGHT_BOOTSTRAP_RUNTIME_DIR;
@@ -47,6 +54,7 @@ export async function smokeTestRuntimeServer(): Promise<void> {
 	try {
 		const descriptor = await ensureWorkspaceRuntime({
 			runtimeDir: tmpDir,
+			serverEntryPath: resolveSourceRuntimeServerEntry(),
 			connectTimeoutMs: 3000,
 			startupTimeoutMs: 5000,
 		});

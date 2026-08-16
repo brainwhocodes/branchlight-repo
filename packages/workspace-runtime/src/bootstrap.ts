@@ -60,6 +60,7 @@ export interface EnsureWorkspaceRuntimeOptions {
 	tokenBasename?: string;
 	endpointBasename?: string;
 	executablePath?: string;
+	serverEntryPath?: string;
 	connectTimeoutMs?: number;
 	startupTimeoutMs?: number;
 }
@@ -230,9 +231,10 @@ export async function ensureWorkspaceRuntime(
 		// 5. Spawn packaged runtime server worker
 		const execPath = options.executablePath ?? process.execPath;
 		const isCompiledBinary = !execPath.endsWith("bun") && !execPath.endsWith("bun.exe");
+		const serverEntryPath = options.serverEntryPath ?? path.join(import.meta.dir, "cli.ts");
 		const spawnArgs = isCompiledBinary
 			? [WORKER_RUNTIME_SERVER_SELECTOR]
-			: [path.join(import.meta.dir, "cli.ts"), WORKER_RUNTIME_SERVER_SELECTOR];
+			: [serverEntryPath, WORKER_RUNTIME_SERVER_SELECTOR];
 
 		const env: Record<string, string> = {
 			...(process.env as Record<string, string>),
