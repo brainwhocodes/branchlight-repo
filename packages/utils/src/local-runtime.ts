@@ -2,7 +2,7 @@ import * as nodeCrypto from "node:crypto";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
+import type { Process as NativeProcess } from "@oh-my-pi/pi-natives";
 
 /** Default maximum encoded JSONL frame, including its trailing newline. */
 export const DEFAULT_LOCAL_FRAME_BYTES = 1024 * 1024;
@@ -366,28 +366,83 @@ export interface ProcessIdentityInspection {
 	expectedStartToken?: string;
 }
 
-function readProcessIdentityToken(processRef: Process): string | undefined {
+const LINUX_PROCESS_START_TOKEN_PREFIX = "linux-procfs-v1:";
+
+interface ObservedProcessIdentity {
+	status: "running" | "dead" | "unverifiable";
+	startToken?: string;
+}
+
+type NativeProcessClass = typeof import("@oh-my-pi/pi-natives")["Process"];
+let nativeProcessClassPromise: Promise<NativeProcessClass | undefined> | undefined;
+
+function loadNativeProcessClass(): Promise<NativeProcessClass | undefined> {
+	nativeProcessClassPromise ??= import("@oh-my-pi/pi-natives").then(module => module.Process).catch(() => undefined);
+	return nativeProcessClassPromise;
+}
+
+function readNativeProcessIdentityToken(processRef: NativeProcess): string | undefined {
 	try {
-		return processRef.identityToken;
+		const token = processRef.identityToken;
+		return typeof token === "string" && token.length > 0 ? token : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
-/** Inspect a fresh PID and compare its native kernel start/birth token. */
+async function observeLinuxProcess(pid: number): Promise<ObservedProcessIdentity | undefined> {
+	if (process.platform !== "linux") return undefined;
+	try {
+		const stat = await fsp.readFile(`/proc/${pid}/stat`, "utf8");
+		const commandEnd = stat.lastIndexOf(")");
+		if (commandEnd < 0) return { status: "unverifiable" };
+		const fields = stat
+			.slice(commandEnd + 2)
+			.trim()
+			.split(/\s+/);
+		const state = fields[0];
+		const startTime = fields[19];
+		if (state === "Z" || state === "X" || state === "x") return { status: "dead" };
+		if (!startTime || !/^\d+$/.test(startTime)) return { status: "unverifiable" };
+		return { status: "running", startToken: `${LINUX_PROCESS_START_TOKEN_PREFIX}${startTime}` };
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ESRCH") return { status: "dead" };
+		return { status: "unverifiable" };
+	}
+}
+
+async function observeNativeProcess(pid: number): Promise<ObservedProcessIdentity> {
+	const ProcessClass = await loadNativeProcessClass();
+	if (!ProcessClass) return { status: "unverifiable" };
+	try {
+		const processRef = ProcessClass.fromPid(pid);
+		if (!processRef || String(processRef.status()) !== "running") return { status: "dead" };
+		const startToken = readNativeProcessIdentityToken(processRef);
+		return startToken ? { status: "running", startToken } : { status: "unverifiable" };
+	} catch {
+		return { status: "unverifiable" };
+	}
+}
+
+/** Inspect a fresh PID and compare its kernel start/birth token. */
 export async function inspectProcessIdentity(identity: ProcessIdentity): Promise<ProcessIdentityInspection> {
 	if (!Number.isSafeInteger(identity.pid) || identity.pid <= 0) return { pid: identity.pid, status: "dead" };
-	const processRef = Process.fromPid(identity.pid);
-	if (!processRef || processRef.status() !== ProcessStatus.Running)
-		return { pid: identity.pid, status: "dead", expectedStartToken: identity.startToken };
-	const observed = readProcessIdentityToken(processRef);
-	if (observed === undefined)
-		return { pid: identity.pid, status: "unverifiable", expectedStartToken: identity.startToken };
+	const expectedStartToken = identity.startToken;
+	const observation = expectedStartToken.startsWith(LINUX_PROCESS_START_TOKEN_PREFIX)
+		? await observeLinuxProcess(identity.pid)
+		: await observeNativeProcess(identity.pid);
+	if (!observation || observation.status === "unverifiable") {
+		return { pid: identity.pid, status: "unverifiable", expectedStartToken };
+	}
+	if (observation.status === "dead") return { pid: identity.pid, status: "dead", expectedStartToken };
+	const observedStartToken = observation.startToken;
+	if (!observedStartToken) return { pid: identity.pid, status: "unverifiable", expectedStartToken };
 	return {
 		pid: identity.pid,
-		expectedStartToken: identity.startToken,
-		observedStartToken: observed,
-		status: observed === identity.startToken ? "matched" : "mismatched",
+		expectedStartToken,
+		observedStartToken,
+		status: observedStartToken === expectedStartToken ? "matched" : "mismatched",
 	};
 }
 
@@ -395,12 +450,17 @@ export async function captureProcessIdentity(
 	pid: number,
 ): Promise<ProcessIdentityInspection & { identity?: ProcessIdentity }> {
 	if (!Number.isSafeInteger(pid) || pid <= 0) return { pid, status: "dead" };
-	const processRef = Process.fromPid(pid);
-	if (!processRef || processRef.status() !== ProcessStatus.Running) return { pid, status: "dead" };
-	const observed = readProcessIdentityToken(processRef);
-	if (observed === undefined) return { pid, status: "unverifiable" };
-	const identity = { pid, startToken: observed };
-	return { pid, status: "matched", observedStartToken: observed, expectedStartToken: observed, identity };
+	const observation = (await observeLinuxProcess(pid)) ?? (await observeNativeProcess(pid));
+	if (observation.status === "dead") return { pid, status: "dead" };
+	if (observation.status !== "running" || !observation.startToken) return { pid, status: "unverifiable" };
+	const identity = { pid, startToken: observation.startToken };
+	return {
+		pid,
+		status: "matched",
+		observedStartToken: observation.startToken,
+		expectedStartToken: observation.startToken,
+		identity,
+	};
 }
 
 export interface ProcessShutdownOptions {
@@ -422,9 +482,11 @@ export async function shutdownProcessTree(
 	const forceMs = Math.max(1, Math.floor(options.forceMs ?? 2_000));
 	let inspection = await inspectProcessIdentity(identity);
 	if (inspection.status !== "matched") return { ...inspection, graceful: false, forced: false };
-	const processRef = Process.fromPid(identity.pid);
-	if (!processRef) return { ...inspection, status: "dead", graceful: false, forced: false };
+	const ProcessClass = await loadNativeProcessClass();
+	if (!ProcessClass) return { ...inspection, graceful: false, forced: false };
 	try {
+		const processRef = ProcessClass.fromPid(identity.pid);
+		if (!processRef) return { ...inspection, status: "dead", graceful: false, forced: false };
 		if (process.platform === "win32") {
 			const timeout = Promise.withResolvers<boolean>();
 			const timer = setTimeout(() => timeout.resolve(false), gracefulMs + forceMs);
@@ -443,7 +505,7 @@ export async function shutdownProcessTree(
 		if (stopped) return { ...(await inspectProcessIdentity(identity)), graceful: true, forced: false };
 		inspection = await inspectProcessIdentity(identity);
 		if (inspection.status !== "matched") return { ...inspection, graceful: false, forced: false };
-		const forceRef = Process.fromPid(identity.pid);
+		const forceRef = ProcessClass.fromPid(identity.pid);
 		if (!forceRef) return { ...inspection, status: "dead", graceful: false, forced: false };
 		forceRef.killTree(9);
 		await forceRef.waitForExit({ timeoutMs: forceMs });

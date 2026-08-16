@@ -29,9 +29,6 @@ import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
-import { launchWorkspaceFromCurrentRepo } from "./desktop-terminal/launcher";
-import { smokeTestRuntimeServer, startRuntimeServerFromEnvironment } from "./desktop-terminal/runtime-server-entry";
-import { startJsEvalProcess } from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
@@ -93,6 +90,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestMnemopiEmbedWorker } = await import("./mnemopi/embed-client");
 	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
 	const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
+	const { smokeTestRuntimeServer } = await import("./desktop-terminal/runtime-server-entry");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { smokeTestDaemonBroker } = await import("./launch/client");
 	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
@@ -182,6 +180,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === JS_EVAL_PROCESS_ARG) {
+		const { startJsEvalProcess } = await import("./eval/js/process-entry");
 		// The bootstrap-safe interceptor seam is linked statically so this selector
 		// cannot load profile-scoped environment state after dispatch has begun.
 		// The JS evaluator forwards user-controlled payloads (tool-call args,
@@ -226,6 +225,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === RUNTIME_SERVER_WORKER_ARG) {
+		const { startRuntimeServerFromEnvironment } = await import("./desktop-terminal/runtime-server-entry");
 		await startRuntimeServerFromEnvironment();
 		return true;
 	}
@@ -403,7 +403,10 @@ export async function runCli(argv: string[]): Promise<void> {
 		await runSmokeTest();
 		return;
 	}
-	if (isProcessEntry && resolvedArgv.length === 0 && (await launchWorkspaceFromCurrentRepo(process.cwd()))) return;
+	if (isProcessEntry && resolvedArgv.length === 0) {
+		const { launchWorkspaceFromCurrentRepo } = await import("./desktop-terminal/launcher");
+		if (await launchWorkspaceFromCurrentRepo(process.cwd())) return;
+	}
 	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
 		import("@oh-my-pi/pi-utils/cli"),
 		import("./cli-commands"),
