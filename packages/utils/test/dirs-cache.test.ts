@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
 	__resetDirsFromEnvForTests,
 	getActiveProfile,
+	getBrowserCacheDir,
 	getConfigDirName,
 	getDocumentConversionCacheDir,
 	getMarketplacesRegistryPath,
@@ -102,6 +103,66 @@ describe("test directory state cleanup", () => {
 			restoreEnv("XDG_CACHE_HOME", originalXdgCacheHome);
 			__resetDirsFromEnvForTests();
 		}
+	});
+});
+
+describe("browser cache directory", () => {
+	let tempRoot = "";
+	let homedirSpy: Mock<() => string> | undefined;
+	let originalPiCodingAgentDir: string | undefined;
+	let originalOmpProfile: string | undefined;
+	let originalPiProfile: string | undefined;
+	let originalXdgCacheHome: string | undefined;
+
+	beforeEach(async () => {
+		originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+		originalOmpProfile = process.env.OMP_PROFILE;
+		originalPiProfile = process.env.PI_PROFILE;
+		originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+		tempRoot = path.join(os.tmpdir(), "pi-utils-browser-cache", Snowflake.next());
+		await fs.mkdir(tempRoot, { recursive: true });
+		homedirSpy = spyOn(os, "homedir").mockReturnValue(tempRoot);
+		delete process.env.OMP_PROFILE;
+		delete process.env.PI_PROFILE;
+		delete process.env.PI_CODING_AGENT_DIR;
+		delete process.env.XDG_CACHE_HOME;
+		__resetDirsFromEnvForTests();
+	});
+
+	afterEach(async () => {
+		homedirSpy?.mockRestore();
+		homedirSpy = undefined;
+		restoreEnv("PI_CODING_AGENT_DIR", originalPiCodingAgentDir);
+		restoreEnv("OMP_PROFILE", originalOmpProfile);
+		restoreEnv("PI_PROFILE", originalPiProfile);
+		restoreEnv("XDG_CACHE_HOME", originalXdgCacheHome);
+		__resetDirsFromEnvForTests();
+		await fs.rm(tempRoot, { recursive: true, force: true });
+	});
+
+	it("adopts the pre-Playwright browser cache when the canonical cache is absent", async () => {
+		const legacyCache = path.join(tempRoot, ".omp", "puppeteer");
+		await fs.mkdir(legacyCache, { recursive: true });
+		await fs.writeFile(path.join(legacyCache, "marker"), "legacy");
+
+		const cacheDir = getBrowserCacheDir();
+
+		expect(cacheDir).toBe(path.join(tempRoot, ".omp", "browser"));
+		expect(await fs.readFile(path.join(cacheDir, "marker"), "utf8")).toBe("legacy");
+		await expect(fs.stat(legacyCache)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("does not clobber an existing canonical browser cache", async () => {
+		const legacyCache = path.join(tempRoot, ".omp", "puppeteer");
+		const cacheDir = path.join(tempRoot, ".omp", "browser");
+		await fs.mkdir(legacyCache, { recursive: true });
+		await fs.mkdir(cacheDir, { recursive: true });
+		await fs.writeFile(path.join(legacyCache, "marker"), "legacy");
+		await fs.writeFile(path.join(cacheDir, "marker"), "canonical");
+
+		expect(getBrowserCacheDir()).toBe(cacheDir);
+		expect(await fs.readFile(path.join(cacheDir, "marker"), "utf8")).toBe("canonical");
+		expect(await fs.readFile(path.join(legacyCache, "marker"), "utf8")).toBe("legacy");
 	});
 });
 

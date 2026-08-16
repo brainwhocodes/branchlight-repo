@@ -94,6 +94,14 @@ impl Process {
 		self.inner.pid()
 	}
 
+	/// Stable identity token derived from the platform's kernel-reported process
+	/// start or creation time.
+	#[napi(getter)]
+	pub fn identity_token(&self) -> String {
+		self.inner.identity_token()
+	}
+
+
 	/// Parent process id for this process, when available.
 	#[napi(getter)]
 	pub fn ppid(&self) -> Option<i32> {

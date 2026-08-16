@@ -5,6 +5,11 @@
 ### Added
 
 - Added `findFreeTcpPort` for shared loopback port allocation.
+- Added dependency-free local runtime primitives for bounded authenticated JSONL framing and request correlation, secure owner-only runtime roots/tokens/endpoints, and verified process identity/tree shutdown.
+
+### Changed
+
+- Changed the Chromium installer contract to pin the Chrome-for-Testing build required by Playwright 1.62.1 and expose the OMP-managed browser cache/version to browser runtimes.
 
 ## [17.2.11] - 2026-08-07
 

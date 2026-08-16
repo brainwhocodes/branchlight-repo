@@ -2,7 +2,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, getConfigRootDir, refreshDirsFromEnv } from "./dirs";
+import { filterProcessEnv, isMacosMallocStackLoggingEnvName, isSafeEnvName, isSafeEnvValue } from "./process-env";
 
+export * from "./process-env";
 export * from "./worker-host";
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -16,42 +18,6 @@ export function isValidEnvName(name: string): boolean {
 	return ENV_NAME_RE.test(name);
 }
 
-/**
- * The only names that are genuinely unsafe to forward to a native `execve`
- * spawn: empty, containing `=` (would corrupt the `KEY=VALUE` framing) or
- * NUL (terminates the C string mid-entry). Windows ships standard variables
- * whose names contain parentheses (e.g. `ProgramFiles(x86)`, `CommonProgramFiles(x86)`)
- * — those MUST survive the scrub so downstream resolvers (Git Bash discovery
- * in `procmgr.ts`, etc.) can still read them.
- */
-export function isSafeEnvName(name: string): boolean {
-	return name.length > 0 && !name.includes("=") && !name.includes("\0");
-}
-
-export function isSafeEnvValue(value: string): boolean {
-	return !value.includes("\0");
-}
-
-export function isMacosMallocStackLoggingEnvName(name: string): boolean {
-	return name === "MallocStackLogging" || name === "MallocStackLoggingNoCompact";
-}
-
-export function filterProcessEnv(env: Record<string, string | undefined>): Record<string, string> {
-	const result: Record<string, string> = {};
-	for (const key in env) {
-		const value = env[key];
-		if (
-			!isSafeEnvName(key) ||
-			isMacosMallocStackLoggingEnvName(key) ||
-			value === undefined ||
-			!isSafeEnvValue(value)
-		) {
-			continue;
-		}
-		result[key] = value;
-	}
-	return result;
-}
 // Bun autoloads the project's dotenv files into `process.env` before user code
 // runs — including inside `bun build --compile` binaries — so a snapshot of
 // `Bun.env` is only pre-dotenv when autoloading was explicitly disabled. Linux
@@ -227,7 +193,8 @@ refreshDirsFromEnv();
  *
  * All users should import this env module (import { $env } from "@oh-my-pi/pi-utils")
  * before using environment variables. This ensures that .env files have been loaded and
- * overrides (project, home) have been applied, so $env always reflects the correct values.
+ * overrides (project, home) have been applied, so $env always reflects
+ * the final process-wide environment.
  */
 export const $env: Record<string, string> = Bun.env as Record<string, string>;
 
@@ -295,7 +262,6 @@ export function isBunTestRuntime(): boolean {
 	const hasTestEnvironment = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
 	return hasTestEnvironment && BUN_TEST_ENTRY_PATTERN.test(Bun.main);
 }
-
 let terminalHeadless = isBunTestRuntime();
 
 /**

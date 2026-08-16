@@ -51,6 +51,12 @@ mod platform {
 			self.pid
 		}
 
+		/// Stable identity token derived from the kernel-reported process start time.
+		#[must_use]
+		pub fn identity_token(&self) -> String {
+			format!("linux:{}", self.start_time)
+		}
+
 		pub fn children(&self) -> Vec<Self> {
 			if !self.live_identity() {
 				return Vec::new();
@@ -360,6 +366,12 @@ mod platform {
 
 		pub const fn pid(&self) -> i32 {
 			self.pid
+		}
+
+		/// Stable identity token derived from the kernel-reported process start time.
+		#[must_use]
+		pub fn identity_token(&self) -> String {
+			format!("darwin:{}:{}", self.start_tvsec, self.start_tvusec)
 		}
 
 		pub fn children(&self) -> Vec<Self> {
@@ -876,6 +888,12 @@ mod platform {
 			self.pid
 		}
 
+		/// Stable identity token derived from the kernel-reported process creation time.
+		#[must_use]
+		pub fn identity_token(&self) -> String {
+			format!("windows:{}", self.creation_time)
+		}
+
 		pub fn parent_pid(&self) -> Option<i32> {
 			process_basic_information(self.handle.as_raw())
 				.and_then(|info| i32::try_from(info.inherited_from_unique_process_id).ok())
@@ -1295,6 +1313,14 @@ impl Process {
 	pub const fn pid(&self) -> i32 {
 		self.inner.pid()
 	}
+
+	/// Stable identity token derived from the platform's kernel-reported process
+	/// start or creation time.
+	#[must_use]
+	pub fn identity_token(&self) -> String {
+		self.inner.identity_token()
+	}
+
 
 	/// Parent process id for this process, when available.
 	#[must_use]

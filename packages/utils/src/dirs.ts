@@ -622,9 +622,23 @@ export function getPythonGatewayDir(): string {
 	return dirs.agentSubdir(undefined, "python-gateway", "state");
 }
 
-/** Get the puppeteer sandbox directory (~/.omp/puppeteer). */
-export function getPuppeteerDir(): string {
-	return dirs.rootSubdir("puppeteer", "cache");
+/**
+ * Get the OMP-managed browser cache directory. A pre-Playwright cache is
+ * adopted once when the canonical directory does not yet exist; an existing
+ * canonical cache always wins.
+ */
+export function getBrowserCacheDir(): string {
+	const cacheDir = dirs.rootSubdir("browser", "cache");
+	const legacyCacheDir = dirs.rootSubdir("puppeteer", "cache");
+	try {
+		if (!fs.existsSync(cacheDir) && fs.existsSync(legacyCacheDir)) {
+			fs.mkdirSync(path.dirname(cacheDir), { recursive: true });
+			fs.renameSync(legacyCacheDir, cacheDir);
+		}
+	} catch {
+		// Best effort: Chromium installation can populate the canonical cache.
+	}
+	return cacheDir;
 }
 
 /** Get the browser relay extension install directory (~/.omp/browser-relay). */

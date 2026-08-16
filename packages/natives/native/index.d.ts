@@ -180,6 +180,8 @@ export declare class Process {
   children(): Array<Process>
   /** Current status of this process reference. */
   status(): ProcessStatus
+  /** Stable identity token derived from the platform's kernel-reported process start or creation time. */
+  get identityToken(): string
 }
 
 /** Stateful PTY session for interactive stdin/stdout passthrough. */

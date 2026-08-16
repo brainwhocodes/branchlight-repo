@@ -3,9 +3,16 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import * as zlib from "node:zlib";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
+
+function loaderModuleUrl() {
+	if (typeof import.meta.url === "string") return import.meta.url;
+	if (typeof __filename === "string") return pathToFileURL(__filename).href;
+	return pathToFileURL(path.join(process.cwd(), "index.js")).href;
+}
 
 /**
  * Native addon loader for `@oh-my-pi/pi-natives`.
@@ -58,7 +65,7 @@ function getNativesDir() {
 
 function resolveLeafPackageDir(platformTag) {
 	try {
-		const require_ = createRequire(import.meta.url);
+		const require_ = createRequire(loaderModuleUrl());
 		return path.dirname(require_.resolve(`@oh-my-pi/pi-natives-${platformTag}/package.json`));
 	} catch {
 		return null;
@@ -754,7 +761,15 @@ export function initLoaderContext(overrides = {}) {
 	const platform = overrides.platform ?? process.platform;
 	const platformTag = `${platform}-${process.arch}`;
 	const packageVersion = packageJson.version;
-	const nativeDir = overrides.nativeDir ?? path.join(import.meta.dir, "..", "native");
+	const metaDir =
+		typeof import.meta.dirname === "string"
+			? import.meta.dirname
+			: typeof import.meta.dir === "string"
+				? import.meta.dir
+				: typeof import.meta.url === "string"
+					? path.dirname(new URL(import.meta.url).pathname)
+					: __dirname;
+	const nativeDir = overrides.nativeDir ?? path.join(metaDir, "..", "native");
 	const execDir = path.dirname(process.execPath);
 	const nativesDir = getNativesDir();
 	const versionedDir = path.join(nativesDir, packageVersion);
@@ -832,7 +847,7 @@ export function initLoaderContext(overrides = {}) {
 export function loadNative() {
 	startupMarker("native:loadNative:start");
 	const ctx = initLoaderContext();
-	const require_ = createRequire(import.meta.url);
+	const require_ = createRequire(loaderModuleUrl());
 
 	const errors = [];
 	const embeddedCandidate = maybeExtractEmbeddedAddon(ctx, errors);
