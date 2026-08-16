@@ -154,11 +154,8 @@ if (!gotLock) {
 			}
 			runtimeClient = runtimeDescriptor.client;
 
-			let doc: WorkspaceDocumentV1;
 			try {
-				const initialDocument = runtimeClient.document ?? (await runtimeClient.getDocument());
 				await ensureDefaultWorkspace(runtimeClient);
-				doc = runtimeClient.document ?? initialDocument;
 			} catch (error) {
 				logger.error("Could not initialize workspace authority", { error: String(error) });
 				app.quit();

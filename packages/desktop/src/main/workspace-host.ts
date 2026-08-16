@@ -122,19 +122,17 @@ export class WorkspaceHost {
 	#boundScopes = new Map<string, SelectionAuthScope>();
 	#client?: WorkspaceClient;
 	#settingsStore?: AppSettingsStore;
-	#cdpUrl?: string;
 	constructor(
 		window: Electron.BaseWindow & { webContents?: Electron.WebContents },
 		settingsStoreOrCdpUrl?: AppSettingsStore | string,
 		cdpUrl = "http://127.0.0.1:9222",
 	) {
 		this.#window = window;
-		if (typeof settingsStoreOrCdpUrl === "string") {
-			this.#cdpUrl = settingsStoreOrCdpUrl;
-		} else {
+		if (typeof settingsStoreOrCdpUrl !== "string") {
 			this.#settingsStore = settingsStoreOrCdpUrl;
-			this.#cdpUrl = cdpUrl;
 		}
+		// Retained for constructor compatibility with older callers.
+		void cdpUrl;
 		this.#selectionCoordinator = new ElementSelectionCoordinator();
 		if ("nativeTheme" in electron && electron.nativeTheme && typeof electron.nativeTheme.on === "function") {
 			electron.nativeTheme.on("updated", () => this.updateTheme());
@@ -612,7 +610,7 @@ export class WorkspaceHost {
 		const doc = this.#client.document;
 		const tab = doc.tabs.find(t => t.id === tabId);
 		if (!tab) {
-			for (const [id, entry] of this.#browsers) {
+			for (const id of this.#browsers.keys()) {
 				const pane = doc.panes.find(p => p.id === id);
 				if (pane && pane.tabId === tabId) this.destroyBrowserView(id);
 			}
