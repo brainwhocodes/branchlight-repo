@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceHost } from "../src/main/workspace-host";
 
 const mockLoadURL = vi.fn().mockResolvedValue(undefined);
-const mockEventHandlers: Record<string, Function[]> = {};
+type MockEventHandler = (...args: unknown[]) => void;
+const mockEventHandlers: Record<string, MockEventHandler[]> = {};
 
 vi.mock("electron", () => ({
 	app: { isPackaged: false, getPath: vi.fn(() => "/tmp/userData") },
@@ -17,7 +18,7 @@ vi.mock("electron", () => ({
 				canGoForward: () => false,
 			},
 			loadURL: mockLoadURL,
-			on: (event: string, handler: Function) => {
+			on: (event: string, handler: MockEventHandler) => {
 				mockEventHandlers[event] = mockEventHandlers[event] || [];
 				mockEventHandlers[event].push(handler);
 			},

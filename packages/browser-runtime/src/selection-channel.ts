@@ -589,8 +589,6 @@ export class BrowserSelectionChannel {
 		}
 
 		const maxDepth = Math.min(options.maxDepth ?? SELECTION_LIMITS.maxDomDepth, SELECTION_LIMITS.maxDomDepth);
-		const maxNodes = Math.min(options.maxNodes ?? SELECTION_LIMITS.maxDomNodes, SELECTION_LIMITS.maxDomNodes);
-
 		const desc = (await session.send("DOM.describeNode", {
 			backendNodeId: this.#activeBackendNodeId,
 			depth: maxDepth,

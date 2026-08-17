@@ -87,7 +87,7 @@ describe("WorkspaceHost reconnect and client replacement", () => {
 	}
 
 	it("retains terminal byte offset across replaceClient and resubscribes from that offset", async () => {
-		const { host, send } = createHost();
+		const { host } = createHost();
 		const doc = createMockDocument();
 
 		let outputCallback1: ((frame: { offset: number; data: string }) => void) | undefined;
@@ -107,7 +107,11 @@ describe("WorkspaceHost reconnect and client replacement", () => {
 		host.syncWithDocument(doc);
 
 		// Initially subscribe terminal at offset 0
-		await (host as unknown as { createTerminal: Function }).createTerminal({
+		await (
+			host as unknown as {
+				createTerminal: (input: Record<string, unknown>) => Promise<unknown>;
+			}
+		).createTerminal({
 			id: "pane-term-1",
 			tabId: "tab_terminal",
 			workspaceId: "ws_1",

@@ -47,12 +47,12 @@
     "sass": "catalog:",
     "@playwright/test": "catalog:",
     "svelte": "catalog:",
-    "ghostty-web": "catalog:",
     "svelte-check": "catalog:",
     "@branchlight/svelte-check": "catalog:",
     "typescript": "npm:typescript@~6.0.0",
     "vite": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "bulma": "catalog:"
   },
   "config": {
     "forge": "forge.config.ts"

@@ -214,7 +214,7 @@ export class PlaywrightBrowserService {
 			await this.releaseTarget(paneId);
 		}
 
-		for (const [cdpUrl, conn] of this.#connections) {
+		for (const conn of this.#connections.values()) {
 			// Shared / attached CDP: NEVER call browser.close()
 			if (!conn.isShared) {
 				await conn.context.close().catch(() => {});

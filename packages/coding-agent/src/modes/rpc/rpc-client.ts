@@ -423,12 +423,36 @@ export class RpcClient {
 			}
 		} catch (cause) {
 			if (this.#process !== child) return;
-			const error = cause instanceof Error ? cause : new Error(String(cause));
-			await this.#handleTransportFailure(
-				child,
-				new Error(`Agent gRPC reader failed: ${error.message}`, { cause: error }),
-			);
+			const readerError = cause instanceof Error ? cause : new Error(String(cause));
+			const failure = await this.#resolveReaderFailure(child, readerError);
+			if (this.#process !== child) return;
+			await this.#handleTransportFailure(child, failure);
 		}
+	}
+
+	async #resolveReaderFailure(child: ptree.ChildProcess, readerError: Error): Promise<Error> {
+		const timeout = Promise.withResolvers<{ kind: "timeout" }>();
+		const timer = setTimeout(() => timeout.resolve({ kind: "timeout" }), 250);
+		timer.unref();
+		try {
+			const observed = await Promise.race([
+				child.exited.then(
+					exitCode => ({
+						kind: "exit" as const,
+						error: new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`),
+					}),
+					cause => ({
+						kind: "exit" as const,
+						error: new Error(`Agent process exited unexpectedly. Stderr: ${child.peekStderr()}`, { cause }),
+					}),
+				),
+				timeout.promise,
+			]);
+			if (observed.kind === "exit") return observed.error;
+		} finally {
+			clearTimeout(timer);
+		}
+		return new Error(`Agent gRPC reader failed: ${readerError.message}`, { cause: readerError });
 	}
 
 	#handleServerFrame(frame: Exclude<OmpGrpcServerFrame, { kind: "ready" }>): void {

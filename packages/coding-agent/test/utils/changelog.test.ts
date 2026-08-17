@@ -326,6 +326,7 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 							PI_PACKAGE_DIR: packageDir,
 							PI_NO_TITLE: "1",
 							NO_COLOR: "1",
+							OMP_DESKTOP: "0",
 							TERM: "xterm-256color",
 						},
 					},

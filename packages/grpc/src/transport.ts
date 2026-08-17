@@ -145,7 +145,10 @@ class ServerConnection implements OmpGrpcServerConnection {
 				this.#finishWithError(error);
 			}
 		});
-		stream.on("aborted", () => this.#queue.fail(new Error("gRPC stream was aborted")));
+		// A client can tear down its Connect stream with RST_STREAM instead of a clean request EOF.
+		// On the server this is a normal peer disconnect: end the input queue so RPC cleanup/dispose runs.
+		// Decoder/protocol failures are still surfaced through #queue.fail above.
+		stream.on("aborted", () => this.#queue.end());
 		stream.on("error", error => this.#queue.fail(error));
 		stream.on("close", () => {
 			if (!this.#requestEnded) this.#queue.fail(new Error("gRPC stream closed before request EOF"));
