@@ -1,0 +1,81 @@
+name: Final runtime serialization
+
+on:
+  push:
+    branches:
+      - feat/omp-chat-workspace
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install system dependencies
+        uses: ./.github/actions/setup-system-deps
+
+      - name: Serialize coding-agent runtime chunks
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/ci.yml')
+          source = path.read_text()
+          old = '''         - name: Test coding-agent runtime bucket
+           # Runtime/session tests import native-backed barrels too; keep this
+           # separate for concurrency, not as a native-free guardrail.
+           env:
+              OMP_TEST_CONCURRENCY: "4"
+           run: bun run ci:test:coding-agent:runtime'''
+          new = '''         - name: Test coding-agent runtime bucket
+           # Runtime/session tests spawn real Bun/http2 child agents. Running
+           # multiple chunks at once on hosted Bun 1.3.14 intermittently resets
+           # loopback h2c streams, so serialize chunks while keeping each chunk
+           # in its own process for heap/process isolation.
+           env:
+              OMP_TEST_CONCURRENCY: "1"
+           run: bun run ci:test:coding-agent:runtime'''
+          if old not in source:
+              raise SystemExit('runtime CI block not found')
+          path.write_text(source.replace(old, new, 1))
+          PY
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install release native addons
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
+          curl -fsSL --retry 3 "$tarball" | tar -xz -C "$tmp"
+          mkdir -p packages/natives/native
+          cp "$tmp/package/pi_natives.linux-x64-baseline.node" packages/natives/native/
+          cp "$tmp/package/pi_natives.linux-x64-modern.node" packages/natives/native/
+
+      - name: Validate runtime/session bucket serially
+        env:
+          OMP_TEST_CONCURRENCY: "1"
+        run: bun run ci:test:coding-agent:runtime
+
+      - name: Publish validated CI stabilization
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/final-runtime-serialization.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/ci.yml .github/workflows/final-runtime-serialization.yml
+          git commit -m "ci: serialize coding-agent runtime chunks"
+          git push origin HEAD:feat/omp-chat-workspace
