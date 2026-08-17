@@ -23,22 +23,19 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/setup-system-deps
 
-      - name: Serialize coding-agent runtime chunks
+      - name: Serialize runtime bucket in test runner
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path('.github/workflows/ci.yml')
+          path = Path('scripts/ci-test-ts.ts')
           source = path.read_text()
-          start = source.index('   test_coding_agent_runtime:')
-          end = source.index('   test_coding_agent_native:', start)
-          block = source[start:end]
-          old = 'OMP_TEST_CONCURRENCY: "4"'
-          if block.count(old) != 1:
-              raise SystemExit(f'expected exactly one runtime concurrency setting, found {block.count(old)}')
-          block = block.replace(old, 'OMP_TEST_CONCURRENCY: "1"', 1)
-          path.write_text(source[:start] + block + source[end:])
+          old = '''\tconst pooled = requestedCommands.length > 1 && (!isCI() || explicitConcurrency);\n\t// The sequential path is a pool of one, so a lone chunk keeps the whole budget.\n\tconst poolWidth = pooled ? testConcurrency(requestedCommands.length) : 1;'''
+          new = '''\t// Runtime/session chunks spawn real Bun/http2 child agents. Bun 1.3.14 can\n\t// intermittently reset loopback h2c streams when several of those chunks run\n\t// concurrently, so keep this bucket process-serial even when CI requests a\n\t// wider pool. Other buckets retain their configured fan-out.\n\tconst forceSequential = requestedMode === "coding-agent-runtime";\n\tconst pooled = !forceSequential && requestedCommands.length > 1 && (!isCI() || explicitConcurrency);\n\t// The sequential path is a pool of one, so a lone chunk keeps the whole budget.\n\tconst poolWidth = pooled ? testConcurrency(requestedCommands.length) : 1;'''
+          if old not in source:
+              raise SystemExit('test runner pool block not found')
+          path.write_text(source.replace(old, new, 1))
           PY
 
       - name: Install dependencies
@@ -55,18 +52,17 @@ jobs:
           cp "$tmp/package/pi_natives.linux-x64-baseline.node" packages/natives/native/
           cp "$tmp/package/pi_natives.linux-x64-modern.node" packages/natives/native/
 
-      - name: Validate runtime/session bucket serially
+      - name: Validate runtime runner ignores four-way fan-out
         env:
-          OMP_TEST_CONCURRENCY: "1"
+          OMP_TEST_CONCURRENCY: "4"
         run: bun run ci:test:coding-agent:runtime
 
-      - name: Publish validated CI stabilization
+      - name: Publish validated runner stabilization
         shell: bash
         run: |
           set -euo pipefail
-          rm .github/workflows/final-runtime-serialization.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/ci.yml .github/workflows/final-runtime-serialization.yml
+          git add scripts/ci-test-ts.ts
           git commit -m "ci: serialize coding-agent runtime chunks"
           git push origin HEAD:feat/omp-chat-workspace
