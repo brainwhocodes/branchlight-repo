@@ -430,6 +430,7 @@
 <style>
 	.workspace-app {
 		display: grid;
+		grid-template-columns: minmax(0, 1fr);
 		grid-template-rows: 34px 46px minmax(0, 1fr);
 		height: 100vh;
 		min-width: 0;

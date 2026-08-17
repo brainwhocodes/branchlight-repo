@@ -23,6 +23,7 @@
   let bootstrap: BootstrapSnapshot | undefined;
   let kind: SessionKind = "work";
   let activeId = "";
+  let sessionSelectionToken = 0;
   let current: SessionSnapshot | undefined;
   let draft = "";
   let errorMessage = "";
@@ -43,6 +44,7 @@
   let subagentTranscript = "";
   let subagentByte = 0;
   let subagentLoading = false;
+  let subagentRequestToken = 0;
   let unsubscribe: (() => void) | undefined;
   let renderedTimeline: TimelineItem[] = [];
   let timelineSource: TimelineItem[] | undefined;
@@ -144,32 +146,42 @@
   });
 
   async function selectSession(id: string): Promise<void> {
+    const requestToken = ++sessionSelectionToken;
+    const requestedKind = kind;
     resetFileDiff();
     resetOpenRouterModelState();
+    if (current?.record.id !== id) resetSubagentSelection();
     openReasoning = new Set();
     activeId = id;
     errorMessage = "";
     try {
-      current = await window.branchlight.openSession(id);
-      availableCommands = current.commands ?? [];
+      const snapshot = await window.branchlight.openSession(id);
+      if (requestToken !== sessionSelectionToken || activeId !== id || kind !== requestedKind) return;
+      current = snapshot;
+      availableCommands = snapshot.commands ?? [];
       commandError = "";
       availableModels = [];
-      if (bootstrap) bootstrap = { ...bootstrap, registry: { ...bootstrap.registry, activeByKind: { ...bootstrap.registry.activeByKind, [kind]: id } } };
+      if (bootstrap) bootstrap = { ...bootstrap, registry: { ...bootstrap.registry, activeByKind: { ...bootstrap.registry.activeByKind, [requestedKind]: id } } };
       await tick();
+      if (requestToken !== sessionSelectionToken || activeId !== id || kind !== requestedKind) return;
       await scrollTimelineToEnd(true, id);
-    } catch (error) { showError(error); }
+    } catch (error) {
+      if (requestToken !== sessionSelectionToken || activeId !== id || kind !== requestedKind) return;
+      activeId = current?.record.id ?? "";
+      showError(error);
+    }
   }
 
   async function selectKind(next: SessionKind): Promise<void> {
     kind = next;
     resetFileDiff();
-    selectedSubagent = "";
-    subagentTranscript = "";
+    resetSubagentSelection();
     const id = bootstrap?.registry.activeByKind[next] ?? bootstrap?.registry.sessions.find(session => session.kind === next)?.id;
     if (id) {
       await selectSession(id);
       loading = false;
     } else {
+      sessionSelectionToken += 1;
       activeId = "";
       current = undefined;
       loading = false;
@@ -746,18 +758,44 @@
   }
 
 
+  function resetSubagentSelection(): void {
+    subagentRequestToken += 1;
+    selectedSubagent = "";
+    subagentTranscript = "";
+    subagentByte = 0;
+    subagentLoading = false;
+  }
+
   async function inspectSubagent(agent: SubagentView): Promise<void> {
     if (!current) return;
-    selectedSubagent = agent.id;
+    const sessionId = current.record.id;
+    const agentId = agent.id;
+    if (selectedSubagent !== agentId) {
+      selectedSubagent = agentId;
+      subagentTranscript = "";
+      subagentByte = 0;
+    }
+    const requestToken = ++subagentRequestToken;
+    const fromByte = subagentByte;
     subagentLoading = true;
     try {
-      const result = await window.branchlight.getSubagentMessages(current.record.id, agent.id, subagentByte);
+      const result = await window.branchlight.getSubagentMessages(sessionId, agentId, fromByte);
+      if (requestToken !== subagentRequestToken || current?.record.id !== sessionId || selectedSubagent !== agentId) return;
       const value = result as { nextByte?: number; reset?: boolean; messages?: unknown[] };
-      if (value.reset) { subagentByte = 0; subagentTranscript = ""; }
-      if (Array.isArray(value.messages)) subagentTranscript += value.messages.map(message => formatMessage(message)).join("\n\n");
+      if (value.reset) {
+        subagentByte = 0;
+        subagentTranscript = "";
+      }
+      if (Array.isArray(value.messages)) {
+        const chunk = value.messages.map(message => formatMessage(message)).join("\n\n");
+        if (chunk) subagentTranscript = subagentTranscript ? `${subagentTranscript}\n\n${chunk}` : chunk;
+      }
       if (typeof value.nextByte === "number") subagentByte = value.nextByte;
-    } catch (error) { showError(error); }
-    finally { subagentLoading = false; }
+    } catch (error) {
+      if (requestToken === subagentRequestToken && current?.record.id === sessionId && selectedSubagent === agentId) showError(error);
+    } finally {
+      if (requestToken === subagentRequestToken && current?.record.id === sessionId && selectedSubagent === agentId) subagentLoading = false;
+    }
   }
   async function respondExtension(response: Record<string, unknown>): Promise<void> {
     if (!current || !pendingExtension) return;
