@@ -913,7 +913,12 @@ if (import.meta.main) {
 	// explicitly opt into bounded process concurrency. Local runs fan out by
 	// default and may use the same override. Resolved before the dry-run check so
 	// `--dry-run` prints the argv the real run would use, budget included.
-	const pooled = requestedCommands.length > 1 && (!isCI() || explicitConcurrency);
+	// Runtime/session chunks spawn real Bun/http2 child agents. Bun 1.3.14 can
+	// intermittently reset loopback h2c streams when several of those chunks run
+	// concurrently, so keep this bucket process-serial even when CI requests a
+	// wider pool. Other buckets retain their configured fan-out.
+	const forceSequential = requestedMode === "coding-agent-runtime";
+	const pooled = !forceSequential && requestedCommands.length > 1 && (!isCI() || explicitConcurrency);
 	// The sequential path is a pool of one, so a lone chunk keeps the whole budget.
 	const poolWidth = pooled ? testConcurrency(requestedCommands.length) : 1;
 	const testCommands = applyChunkBudget(requestedCommands, poolWidth);
