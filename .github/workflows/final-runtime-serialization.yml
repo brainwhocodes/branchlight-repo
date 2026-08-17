@@ -37,21 +37,7 @@ jobs:
           old = 'OMP_TEST_CONCURRENCY: "4"'
           if block.count(old) != 1:
               raise SystemExit(f'expected exactly one runtime concurrency setting, found {block.count(old)}')
-          block = block.replace(
-              '''# Runtime/session tests import native-backed barrels too; keep this
-           # separate for concurrency, not as a native-free guardrail.
-           env:
-              OMP_TEST_CONCURRENCY: "4"''',
-              '''# Runtime/session tests spawn real Bun/http2 child agents. Running
-           # multiple chunks at once on hosted Bun 1.3.14 intermittently resets
-           # loopback h2c streams, so serialize chunks while keeping each chunk
-           # in its own process for heap/process isolation.
-           env:
-              OMP_TEST_CONCURRENCY: "1"''',
-              1,
-          )
-          if 'OMP_TEST_CONCURRENCY: "1"' not in block:
-              raise SystemExit('failed to update runtime concurrency')
+          block = block.replace(old, 'OMP_TEST_CONCURRENCY: "1"', 1)
           path.write_text(source[:start] + block + source[end:])
           PY
 
