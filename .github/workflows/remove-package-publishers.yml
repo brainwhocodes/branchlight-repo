@@ -6,13 +6,15 @@ on:
       - feat/omp-chat-workspace
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   prepare:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Remove npm and Homebrew publishing
         shell: bash
@@ -21,10 +23,76 @@ jobs:
           ruby -e 'require "yaml"; YAML.parse_file(ARGV.fetch(0))' .github/workflows/ci.yml
           git diff --check -- .github/workflows/ci.yml
 
-      - name: Upload patched CI workflow
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-without-package-publishers
-          path: .github/workflows/ci.yml
-          if-no-files-found: error
-          retention-days: 1
+      - name: Create final cleanup commit object
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          base_tree="$(git rev-parse 'HEAD^{tree}')"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64
+          import json
+          import os
+
+          temp = Path(os.environ['RUNNER_TEMP'])
+          workflow = Path('.github/workflows/ci.yml').read_bytes()
+          (temp / 'blob.json').write_text(json.dumps({
+              'content': base64.b64encode(workflow).decode('ascii'),
+              'encoding': 'base64',
+          }))
+          PY
+          blob_sha="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/blobs" --input "$RUNNER_TEMP/blob.json" --jq .sha)"
+
+          python3 - "$base_tree" "$blob_sha" <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import sys
+
+          temp = Path(os.environ['RUNNER_TEMP'])
+          (temp / 'tree.json').write_text(json.dumps({
+              'base_tree': sys.argv[1],
+              'tree': [
+                  {
+                      'path': '.github/workflows/ci.yml',
+                      'mode': '100644',
+                      'type': 'blob',
+                      'sha': sys.argv[2],
+                  },
+                  {
+                      'path': '.github/workflows/remove-package-publishers.yml',
+                      'mode': '100644',
+                      'type': 'blob',
+                      'sha': None,
+                  },
+                  {
+                      'path': 'scripts/remove-package-publishers.py',
+                      'mode': '100644',
+                      'type': 'blob',
+                      'sha': None,
+                  },
+              ],
+          }))
+          PY
+          tree_sha="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/trees" --input "$RUNNER_TEMP/tree.json" --jq .sha)"
+
+          python3 - "$tree_sha" "$head_sha" <<'PY'
+          from pathlib import Path
+          import json
+          import os
+          import sys
+
+          temp = Path(os.environ['RUNNER_TEMP'])
+          (temp / 'commit.json').write_text(json.dumps({
+              'message': 'ci: remove npm and Homebrew publishing',
+              'tree': sys.argv[1],
+              'parents': [sys.argv[2]],
+          }))
+          PY
+          commit_sha="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/commits" --input "$RUNNER_TEMP/commit.json" --jq .sha)"
+          echo "PATCH_COMMIT_SHA=$commit_sha"
+          echo "Final cleanup commit: $commit_sha" >> "$GITHUB_STEP_SUMMARY"
