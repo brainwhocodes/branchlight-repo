@@ -1,4 +1,4 @@
-name: Remove package publishers
+name: Prepare publisher cleanup
 
 on:
   push:
@@ -6,214 +6,28 @@ on:
       - feat/omp-chat-workspace
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-and-prepare-commit:
+  prepare:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Remove npm and Homebrew publishing from CI
-        id: patch
+      - name: Remove npm and Homebrew publishing
         shell: bash
+        env:
+          PATCH_SCRIPT_B64: "ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCmltcG9ydCByZQoKcGF0aCA9IFBhdGgoIi5naXRodWIvd29ya2Zsb3dzL2NpLnltbCIpCnNvdXJjZSA9IHBhdGgucmVhZF90ZXh0KCkKCmRlZiByZXBsYWNlX2V4YWN0KG9sZDogc3RyLCBuZXc6IHN0ciwgbGFiZWw6IHN0cikgLT4gTm9uZToKICAgIGdsb2JhbCBzb3VyY2UKICAgIGlmIG9sZCBub3QgaW4gc291cmNlOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoZiJFeHBlY3RlZCB7bGFiZWx9IGJsb2NrIHdhcyBub3QgZm91bmQiKQogICAgc291cmNlID0gc291cmNlLnJlcGxhY2Uob2xkLCBuZXcsIDEpCgpkZWYgcmVtb3ZlX2pvYihuYW1lOiBzdHIsIGxlYWRpbmdfY29tbWVudDogc3RyIHwgTm9uZSA9IE5vbmUpIC0+IE5vbmU6CiAgICBnbG9iYWwgc291cmNlCiAgICBqb2JfbWFya2VyID0gZiJcbiAgIHtuYW1lfTpcbiIKICAgIGpvYl9zdGFydCA9IHNvdXJjZS5maW5kKGpvYl9tYXJrZXIpCiAgICBpZiBqb2Jfc3RhcnQgPCAwOgogICAgICAgIHJhaXNlIFN5c3RlbUV4aXQoZiJKb2Ige25hbWV9IHdhcyBub3QgZm91bmQiKQogICAgaWYgbGVhZGluZ19jb21tZW50OgogICAgICAgIHN0YXJ0ID0gc291cmNlLnJmaW5kKGxlYWRpbmdfY29tbWVudCwgMCwgam9iX3N0YXJ0KQogICAgICAgIGlmIHN0YXJ0IDwgMDoKICAgICAgICAgICAgcmFpc2UgU3lzdGVtRXhpdChmIkxlYWRpbmcgY29tbWVudCBmb3Ige25hbWV9IHdhcyBub3QgZm91bmQiKQogICAgZWxzZToKICAgICAgICBzdGFydCA9IGpvYl9zdGFydAogICAgc2VhcmNoX2Zyb20gPSBqb2Jfc3RhcnQgKyBsZW4oam9iX21hcmtlcikKICAgIG5leHRfam9iID0gcmUuc2VhcmNoKHIiXG4gICBbQS1aYS16MC05X10rOlxuIiwgc291cmNlW3NlYXJjaF9mcm9tOl0pCiAgICBlbmQgPSBzZWFyY2hfZnJvbSArIG5leHRfam9iLnN0YXJ0KCkgaWYgbmV4dF9qb2IgZWxzZSBsZW4oc291cmNlKQogICAgc291cmNlID0gc291cmNlWzpzdGFydF0ucnN0cmlwKCkgKyAiXG5cbiIgKyBzb3VyY2VbZW5kOl0ubHN0cmlwKCJcbiIpCgpyZXBsYWNlX2V4YWN0KAogICAgJycnICAgd29ya2Zsb3dfZGlzcGF0Y2g6CiAgICAgIGlucHV0czoKICAgICAgICAgc2tpcF9ucG06CiAgICAgICAgICAgIGRlc2NyaXB0aW9uOiAiU2tpcCBucG0gcHVibGlzaCIKICAgICAgICAgICAgdHlwZTogYm9vbGVhbgogICAgICAgICAgICBkZWZhdWx0OiBmYWxzZQonJycsCiAgICAnJycgICB3b3JrZmxvd19kaXNwYXRjaDoKJycnLAogICAgIndvcmtmbG93X2Rpc3BhdGNoIG5wbSBpbnB1dCIsCikKCnJlcGxhY2VfZXhhY3QoCiAgICAnJycgICAjIEEgcHVzaGVkIGB2KmAgcmVmIGlzIGF1dGhvcml0YXRpdmUgZm9yIHJlbGVhc2UgYnVpbGRzIGFuZCBwdWJsaXNoaW5nLgogICAjIE1haW4gc3RpbGwgcnVucyBub3JtYWwgdmFsaWRhdGlvbiBmb3IgdGhlIHZlcnNpb24tYnVtcCBjb21taXQsIHdoaWxlIHRoZQogICAjIHRhZyBydW4gYnVpbGRzIHRoZSBwbGF0Zm9ybSBiaW5hcmllcyBpbiBwYXJhbGxlbCBhbmQgcHVibGlzaGVzIG9ubHkgYWZ0ZXIKICAgIyBpdHMgb3duIHZhbGlkYXRpb24gZ2F0ZSBzdWNjZWVkcy4gQSBtYW51YWwgZGlzcGF0Y2ggZnJvbSBhIHRhZ2dlZCBtYWluIEhFQUQKJycnLAogICAgJycnICAgIyBBIHB1c2hlZCBgdipgIHJlZiBpcyBhdXRob3JpdGF0aXZlIGZvciByZWxlYXNlIGJ1aWxkcyBhbmQgR2l0SHViIHJlbGVhc2VzLgogICAjIE1haW4gc3RpbGwgcnVucyBub3JtYWwgdmFsaWRhdGlvbiBmb3IgdGhlIHZlcnNpb24tYnVtcCBjb21taXQsIHdoaWxlIHRoZQogICAjIHRhZyBydW4gYnVpbGRzIHRoZSBwbGF0Zm9ybSBiaW5hcmllcyBpbiBwYXJhbGxlbCBhbmQgY3JlYXRlcyB0aGUgR2l0SHViCiAgICMgcmVsZWFzZSBvbmx5IGFmdGVyIGl0cyBvd24gdmFsaWRhdGlvbiBnYXRlIHN1Y2NlZWRzLiBBIG1hbnVhbCBkaXNwYXRjaCBmcm9tIGEgdGFnZ2VkIG1haW4gSEVBRAonJycsCiAgICAicmVsZWFzZSBvdmVydmlldyBjb21tZW50IiwKKQoKcmVwbGFjZV9leGFjdCgKICAgICcnJyAgICMgQWdncmVnYXRlcyBldmVyeSB2YWxpZGF0aW9uIGpvYiBzbyBwdWJsaXNoLXNpZGUgcmVsZWFzZSBqb2JzIGdhdGUgb24gb25lCiAgICMgcmVzdWx0LiBCaW5hcnkgQlVJTERTIGRlbGliZXJhdGVseSBkbyBub3Qgd2FpdCBmb3IgdGhpcyBnYXRlIOKAlCB0aGV5IHJ1bgogICAjIGluIHBhcmFsbGVsIHdpdGggdGhlIHRlc3QgZmFuLW91dCBhbmQgb25seSBwdWJsaXNoaW5nIGlzIGhlbGQgYmFjay4KJycnLAogICAgJycnICAgIyBBZ2dyZWdhdGVzIGV2ZXJ5IHZhbGlkYXRpb24gam9iIHNvIEdpdEh1YiByZWxlYXNlIHB1YmxpY2F0aW9uIGdhdGVzIG9uIG9uZQogICAjIHJlc3VsdC4gQmluYXJ5IGJ1aWxkcyBkZWxpYmVyYXRlbHkgZG8gbm90IHdhaXQgZm9yIHRoaXMgZ2F0ZSDigJQgdGhleSBydW4KICAgIyBpbiBwYXJhbGxlbCB3aXRoIHRoZSB0ZXN0IGZhbi1vdXQgd2hpbGUgcmVsZWFzZSBwdWJsaWNhdGlvbiBpcyBoZWxkIGJhY2suCicnJywKICAgICJyZWxlYXNlIGdhdGUgY29tbWVudCIsCikKCnJlcGxhY2VfZXhhY3QoCiAgICAnJycgICAjIEJ1aWxkcyAoZG9lcyBub3QgcHVibGlzaCkgdGhlIExpbnV4LWhvc3RlZCByZWxlYXNlIGJpbmFyaWVzIGluIHBhcmFsbGVsCiAgICMgd2l0aCB0aGUgdGVzdCBmYW4tb3V0OyB0aGUgc2luZ2xlIG5lZWQgaXMgbmF0aXZlX2FkZG9ucywgd2hvc2UgYXJ0aWZhY3QKICAgIyBzdXBwbGllcyB0aGVpciBhZGRvbnMuIERhcndpbiBidWlsZHMgbGl2ZSBpbiByZWxlYXNlX2JpbmFyeV9kYXJ3aW4gc28KICAgIyB0aGV5IHN0YXJ0IGF0IHJlbGVhc2VfbWV0YWRhdGEgdGltZSBpbnN0ZWFkLiBQdWJsaXNoaW5nIChucG0gbGVhdmVzLAogICAjIEdpdEh1YiByZWxlYXNlLCBjb3JlIG5wbSkgaXMgZ2F0ZWQgb24gcmVsZWFzZV9nYXRlIGRvd25zdHJlYW0uCicnJywKICAgICcnJyAgICMgQnVpbGRzIChkb2VzIG5vdCBwdWJsaXNoKSB0aGUgTGludXgtaG9zdGVkIHJlbGVhc2UgYmluYXJpZXMgaW4gcGFyYWxsZWwKICAgIyB3aXRoIHRoZSB0ZXN0IGZhbi1vdXQ7IHRoZSBzaW5nbGUgbmVlZCBpcyBuYXRpdmVfYWRkb25zLCB3aG9zZSBhcnRpZmFjdAogICAjIHN1cHBsaWVzIHRoZWlyIGFkZG9ucy4gRGFyd2luIGJ1aWxkcyBsaXZlIGluIHJlbGVhc2VfYmluYXJ5X2RhcndpbiBzbwogICAjIHRoZXkgc3RhcnQgYXQgcmVsZWFzZV9tZXRhZGF0YSB0aW1lIGluc3RlYWQuIEdpdEh1YiByZWxlYXNlIHB1YmxpY2F0aW9uCiAgICMgaXMgZ2F0ZWQgb24gcmVsZWFzZV9nYXRlIGRvd25zdHJlYW0uCicnJywKICAgICJyZWxlYXNlIGJpbmFyeSBjb21tZW50IiwKKQoKZGFyd2luX3VwbG9hZF9zdGFydCA9IHNvdXJjZS5maW5kKAogICAgJycnICAgICAgICAgIyBEYXJ3aW4gYWRkb25zIGV4aXN0IG9ubHkgb24gdGhlc2UgcnVubmVyczsgZXhwb3J0IHRoZW0gc28KICAgICAgICAgIyByZWxlYXNlX25hdGl2ZV9sZWF2ZXMgY2FuIHB1Ymxpc2ggZXZlcnkgbGVhZiBwYWNrYWdlIGFmdGVyIHRoZQogICAgICAgICAjIHZhbGlkYXRpb24gZ2F0ZS4gTm9uLWRhcndpbiBsZWF2ZXMgcmV1c2UgdGhlIG5hdGl2ZS1hZGRvbnMgYXJ0aWZhY3QuCiAgICAgICAgIC0gbmFtZTogVXBsb2FkIGRhcndpbiBuYXRpdmUgYWRkb24gYXJ0aWZhY3QKJycnCikKaWYgZGFyd2luX3VwbG9hZF9zdGFydCA8IDA6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJEYXJ3aW4gbmF0aXZlIGxlYWYgdXBsb2FkIHN0ZXAgd2FzIG5vdCBmb3VuZCIpCmRhcndpbl91cGxvYWRfZW5kID0gc291cmNlLmZpbmQoCiAgICAiICAgICAgICAgLSBuYW1lOiBVcGxvYWQgcmVsZWFzZSBiaW5hcnkgYXJ0aWZhY3RcbiIsCiAgICBkYXJ3aW5fdXBsb2FkX3N0YXJ0LAopCmlmIGRhcndpbl91cGxvYWRfZW5kIDwgMDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoIkRhcndpbiByZWxlYXNlIGJpbmFyeSB1cGxvYWQgc3RlcCB3YXMgbm90IGZvdW5kIikKc291cmNlID0gc291cmNlWzpkYXJ3aW5fdXBsb2FkX3N0YXJ0XSArIHNvdXJjZVtkYXJ3aW5fdXBsb2FkX2VuZDpdCgpyZW1vdmVfam9iKAogICAgInJlbGVhc2VfbmF0aXZlX2xlYXZlcyIsCiAgICAiICAgIyBQdWJsaXNoZXMgdGhlIGZpdmUgQG9oLW15LXBpL3BpLW5hdGl2ZXMtPHRhZz4gbGVhZiBwYWNrYWdlcyBvbmNlXG4iLAopCnJlbW92ZV9qb2IoInJlbGVhc2VfbnBtIikKcmVtb3ZlX2pvYigKICAgICJyZWxlYXNlX2JyZXciLAogICAgIiAgICMgUmVnZW5lcmF0ZSB0aGUgSG9tZWJyZXcgdGFwIGZvcm11bGEgKGNhbjEzNTcvaG9tZWJyZXctdGFwKSBmcm9tIHRoZSBmcmVzaGx5XG4iLAopCgpmb3JiaWRkZW4gPSBbCiAgICAic2tpcF9ucG0iLAogICAgInJlbGVhc2VfbmF0aXZlX2xlYXZlczoiLAogICAgInJlbGVhc2VfbnBtOiIsCiAgICAicmVsZWFzZV9icmV3OiIsCiAgICAiUHVibGlzaCBuYXRpdmUgbGVhZiBwYWNrYWdlcyIsCiAgICAiUHVibGlzaCB0byBucG0iLAogICAgIlVwZGF0ZSBIb21lYnJldyB0YXAiLAogICAgIk5QTV9UT0tFTiIsCiAgICAiSE9NRUJSRVdfVEFQX0RFUExPWV9LRVkiLAogICAgImNpOnJlbGVhc2U6cHVibGlzaC1uYXRpdmUtbGVhZiIsCiAgICAiY2k6cmVsZWFzZTpwdWJsaXNoXG4iLAogICAgImNpLXVwZGF0ZS1icmV3LWZvcm11bGEudHMiLAogICAgIm5hdGl2ZS1hZGRvbnMtZGFyd2luLSoiLApdCnJlbWFpbmluZyA9IFt2YWx1ZSBmb3IgdmFsdWUgaW4gZm9yYmlkZGVuIGlmIHZhbHVlIGluIHNvdXJjZV0KaWYgcmVtYWluaW5nOgogICAgcmFpc2UgU3lzdGVtRXhpdChmIlB1Ymxpc2hlciByZWZlcmVuY2VzIHJlbWFpbjoge3JlbWFpbmluZ30iKQpmb3IgcmVxdWlyZWQgaW4gKCIgICByZWxlYXNlX2dpdGh1YjpcbiIsICIgICByZWxlYXNlX2dpdGh1Yl92ZXJpZnk6XG4iKToKICAgIGlmIHJlcXVpcmVkIG5vdCBpbiBzb3VyY2U6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdChmIlJlcXVpcmVkIEdpdEh1YiByZWxlYXNlIGpvYiBkaXNhcHBlYXJlZDoge3JlcXVpcmVkLnN0cmlwKCl9IikKCnBhdGgud3JpdGVfdGV4dChzb3VyY2UucnN0cmlwKCkgKyAiXG4iKQo="
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path('.github/workflows/ci.yml')
-          source = path.read_text()
-
-          def replace_exact(old: str, new: str, label: str) -> None:
-              global source
-              if old not in source:
-                  raise SystemExit(f'Expected {label} block was not found')
-              source = source.replace(old, new, 1)
-
-          def remove_job(name: str, leading_comment: str | None = None) -> None:
-              global source
-              job_marker = f'\n   {name}:\n'
-              job_start = source.find(job_marker)
-              if job_start < 0:
-                  raise SystemExit(f'Job {name} was not found')
-              start = source.rfind(leading_comment, 0, job_start) if leading_comment else job_start
-              if start < 0:
-                  raise SystemExit(f'Leading comment for {name} was not found')
-              search_from = job_start + len(job_marker)
-              next_job = re.search(r'\n   [A-Za-z0-9_]+:\n', source[search_from:])
-              end = search_from + next_job.start() if next_job else len(source)
-              source = source[:start].rstrip() + '\n\n' + source[end:].lstrip('\n')
-
-          replace_exact(
-              '''   workflow_dispatch:
-      inputs:
-         skip_npm:
-            description: "Skip npm publish"
-            type: boolean
-            default: false
-''',
-              '''   workflow_dispatch:
-''',
-              'workflow_dispatch npm input',
-          )
-
-          replace_exact(
-              '''   # A pushed `v*` ref is authoritative for release builds and publishing.
-   # Main still runs normal validation for the version-bump commit, while the
-   # tag run builds the platform binaries in parallel and publishes only after
-   # its own validation gate succeeds. A manual dispatch from a tagged main HEAD
-''',
-              '''   # A pushed `v*` ref is authoritative for release builds and GitHub releases.
-   # Main still runs normal validation for the version-bump commit, while the
-   # tag run builds the platform binaries in parallel and creates the GitHub
-   # release only after its own validation gate succeeds. A manual dispatch from a tagged main HEAD
-''',
-              'release overview comment',
-          )
-
-          replace_exact(
-              '''   # Aggregates every validation job so publish-side release jobs gate on one
-   # result. Binary BUILDS deliberately do not wait for this gate — they run
-   # in parallel with the test fan-out and only publishing is held back.
-''',
-              '''   # Aggregates every validation job so GitHub release publication gates on one
-   # result. Binary builds deliberately do not wait for this gate — they run
-   # in parallel with the test fan-out while release publication is held back.
-''',
-              'release gate comment',
-          )
-
-          replace_exact(
-              '''   # Builds (does not publish) the Linux-hosted release binaries in parallel
-   # with the test fan-out; the single need is native_addons, whose artifact
-   # supplies their addons. Darwin builds live in release_binary_darwin so
-   # they start at release_metadata time instead. Publishing (npm leaves,
-   # GitHub release, core npm) is gated on release_gate downstream.
-''',
-              '''   # Builds (does not publish) the Linux-hosted release binaries in parallel
-   # with the test fan-out; the single need is native_addons, whose artifact
-   # supplies their addons. Darwin builds live in release_binary_darwin so
-   # they start at release_metadata time instead. GitHub release publication
-   # is gated on release_gate downstream.
-''',
-              'release binary comment',
-          )
-
-          darwin_upload_start = source.find(
-              '''         # Darwin addons exist only on these runners; export them so
-         # release_native_leaves can publish every leaf package after the
-         # validation gate. Non-darwin leaves reuse the native-addons artifact.
-         - name: Upload darwin native addon artifact
-'''
-          )
-          if darwin_upload_start < 0:
-              raise SystemExit('Darwin native leaf upload step was not found')
-          darwin_upload_end = source.find('         - name: Upload release binary artifact\n', darwin_upload_start)
-          if darwin_upload_end < 0:
-              raise SystemExit('Darwin release binary upload step was not found')
-          source = source[:darwin_upload_start] + source[darwin_upload_end:]
-
-          remove_job(
-              'release_native_leaves',
-              '   # Publishes the five @oh-my-pi/pi-natives-<tag> leaf packages once\n',
-          )
-          remove_job('release_npm')
-          remove_job(
-              'release_brew',
-              '   # Regenerate the Homebrew tap formula (can1357/homebrew-tap) from the freshly\n',
-          )
-
-          forbidden = [
-              'skip_npm',
-              'release_native_leaves:',
-              'release_npm:',
-              'release_brew:',
-              'Publish native leaf packages',
-              'Publish to npm',
-              'Update Homebrew tap',
-              'NPM_TOKEN',
-              'HOMEBREW_TAP_DEPLOY_KEY',
-              'ci:release:publish-native-leaf',
-              'ci:release:publish\n',
-              'ci-update-brew-formula.ts',
-              'native-addons-darwin-*',
-          ]
-          remaining = [value for value in forbidden if value in source]
-          if remaining:
-              raise SystemExit(f'Publisher references remain: {remaining}')
-          for required in ('   release_github:\n', '   release_github_verify:\n'):
-              if required not in source:
-                  raise SystemExit(f'Required GitHub release job disappeared: {required.strip()}')
-
-          path.write_text(source.rstrip() + '\n')
-          PY
-
+          printf '%s' "$PATCH_SCRIPT_B64" | base64 --decode > "$RUNNER_TEMP/remove-publishers.py"
+          python3 "$RUNNER_TEMP/remove-publishers.py"
           ruby -e 'require "yaml"; YAML.parse_file(ARGV.fetch(0))' .github/workflows/ci.yml
           git diff --check -- .github/workflows/ci.yml
 
-          if git diff --quiet -- .github/workflows/ci.yml; then
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
-          else
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create unattached commit object
-        if: steps.patch.outputs.changed == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          head_sha="$(git rev-parse HEAD)"
-          base_tree="$(git rev-parse 'HEAD^{tree}')"
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import base64
-          import json
-          import os
-
-          runner_temp = Path(os.environ['RUNNER_TEMP'])
-          content = Path('.github/workflows/ci.yml').read_bytes()
-          (runner_temp / 'blob.json').write_text(json.dumps({
-              'content': base64.b64encode(content).decode('ascii'),
-              'encoding': 'base64',
-          }))
-          PY
-
-          blob_sha="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/blobs" --input "$RUNNER_TEMP/blob.json" --jq .sha)"
-          python3 - "$base_tree" "$blob_sha" <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import sys
-
-          Path(os.environ['RUNNER_TEMP'], 'tree.json').write_text(json.dumps({
-              'base_tree': sys.argv[1],
-              'tree': [{
-                  'path': '.github/workflows/ci.yml',
-                  'mode': '100644',
-                  'type': 'blob',
-                  'sha': sys.argv[2],
-              }],
-          }))
-          PY
-          tree_sha="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/trees" --input "$RUNNER_TEMP/tree.json" --jq .sha)"
-
-          python3 - "$tree_sha" "$head_sha" <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import sys
-
-          Path(os.environ['RUNNER_TEMP'], 'commit.json').write_text(json.dumps({
-              'message': 'ci: remove npm and Homebrew publishing',
-              'tree': sys.argv[1],
-              'parents': [sys.argv[2]],
-          }))
-          PY
-          commit_sha="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/commits" --input "$RUNNER_TEMP/commit.json" --jq .sha)"
-          echo "PATCH_COMMIT_SHA=$commit_sha"
+      - name: Upload patched CI workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-without-package-publishers
+          path: .github/workflows/ci.yml
+          if-no-files-found: error
+          retention-days: 1
