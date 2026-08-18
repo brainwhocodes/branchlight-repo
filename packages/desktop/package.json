@@ -23,8 +23,7 @@
     "package": "electron-forge package",
     "test:e2e:performance": "playwright test --config playwright.performance.config.ts",
     "make": "electron-forge make",
-    "make:contained": "bun scripts/build-contained.ts",
-    "docs:screenshot": "playwright test --config playwright.readme.config.ts"
+    "make:contained": "bun scripts/build-contained.ts"
   },
   "dependencies": {
     "@oh-my-pi/pi-grpc": "catalog:",
