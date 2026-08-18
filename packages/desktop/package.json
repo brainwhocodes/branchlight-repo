@@ -3,8 +3,8 @@
   "productName": "Mars Kommander",
   "version": "0.1.0",
   "private": true,
-  "description": "Branchlight desktop agent workspace",
-  "author": "Branchlight Labs",
+  "description": "Mars Kommander desktop workspace powered by Oh My Pi",
+  "author": "Mars Kommander",
   "license": "MIT",
   "main": ".vite/build/main.js",
   "scripts": {
@@ -22,7 +22,8 @@
     "test:e2e:packaged": "playwright test --config playwright.packaged.config.ts",
     "package": "electron-forge package",
     "test:e2e:performance": "playwright test --config playwright.performance.config.ts",
-    "make": "electron-forge make"
+    "make": "electron-forge make",
+    "make:contained": "bun scripts/build-contained.ts"
   },
   "dependencies": {
     "@oh-my-pi/pi-grpc": "catalog:",

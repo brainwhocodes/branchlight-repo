@@ -18,8 +18,8 @@ const config: ForgeConfig = {
 		executableName: "Mars Kommander",
 		appBundleId: "labs.mars-kommander.desktop",
 		win32metadata: {
-			CompanyName: "Mars Kommander Labs",
-			FileDescription: "Mars Kommander desktop agent workspace",
+			CompanyName: "Mars Kommander",
+			FileDescription: "Mars Kommander desktop workspace powered by Oh My Pi",
 			ProductName: "Mars Kommander",
 			OriginalFilename: "Mars Kommander.exe",
 		},
@@ -34,10 +34,10 @@ const config: ForgeConfig = {
 	rebuildConfig: {},
 	makers: [
 		new MakerSquirrel({
-			name: "branchlight",
-			authors: "Branchlight Labs",
-			description: "Branchlight desktop agent workspace",
-			setupExe: "BranchlightSetup.exe",
+			name: "MarsKommander",
+			authors: "Mars Kommander",
+			description: "Mars Kommander desktop workspace powered by Oh My Pi",
+			setupExe: "MarsKommanderSetup.exe",
 			setupIcon: path.join(root, "resources", "icon.ico"),
 			noMsi: true,
 		}),
