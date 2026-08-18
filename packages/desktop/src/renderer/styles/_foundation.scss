@@ -1,0 +1,180 @@
+// Mars Kommander design foundation.
+// Shared color, type, spacing, and motion tokens for the desktop shell and OMP Chat.
+
+:root {
+	font-family: "Nunito Sans Variable", "Segoe UI", sans-serif;
+	font-synthesis: none;
+	text-rendering: optimizeLegibility;
+	--font-sans: "Nunito Sans Variable", "Segoe UI", sans-serif;
+	--font-display: "Sora Variable", "Segoe UI", sans-serif;
+	--font-mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+	--ease-standard: cubic-bezier(0.16, 1, 0.3, 1);
+	--radius-small: 5px;
+	--radius-medium: 8px;
+	--radius-large: 12px;
+	--session-rail-width: clamp(228px, 18vw, 264px);
+	--inspector-width: clamp(288px, 22vw, 340px);
+	--chat-content-width: 900px;
+	--chat-message-width: 72ch;
+	--control-height: 36px;
+}
+
+:root,
+:root[data-theme="dark"] {
+	color-scheme: dark;
+	color: oklch(0.91 0.012 62);
+	background: oklch(0.19 0.008 66);
+	--shell: oklch(0.205 0.009 65);
+	--shell-raised: oklch(0.235 0.011 64);
+	--shell-hover: oklch(0.275 0.012 62);
+	--chat-canvas: oklch(0.175 0.012 58);
+	--browser: oklch(0.19 0.008 66);
+	--line: oklch(0.35 0.012 64);
+	--line-soft: oklch(0.29 0.01 64);
+	--foreground: oklch(0.91 0.012 62);
+	--foreground-strong: oklch(0.98 0.005 60);
+	--foreground-muted: oklch(0.68 0.016 64);
+	--inverse-foreground: oklch(0.18 0.01 60);
+	--inverse-surface: oklch(0.95 0.008 65);
+	--accent: oklch(0.69 0.145 48);
+	--accent-soft: oklch(0.69 0.145 48 / 0.12);
+	--danger: oklch(0.66 0.16 30);
+	--danger-surface: oklch(0.25 0.08 30);
+	--success: oklch(0.72 0.105 154);
+	--warning: oklch(0.8 0.12 82);
+	--shadow-color: oklch(0.04 0.01 60 / 0.42);
+
+	// The outer Electron shell currently consumes these semantic aliases.
+	--surface-base: var(--shell);
+	--surface-raised: var(--shell-raised);
+	--text-primary: var(--foreground-strong);
+	--text-muted: var(--foreground-muted);
+}
+
+:root[data-theme="light"] {
+	color-scheme: light;
+	color: oklch(0.22 0.02 260);
+	background: oklch(0.96 0.005 240);
+	--shell: oklch(0.95 0.005 240);
+	--shell-raised: oklch(0.99 0 0);
+	--shell-hover: oklch(0.92 0.01 240);
+	--chat-canvas: oklch(0.985 0.002 240);
+	--browser: oklch(1 0 0);
+	--line: oklch(0.82 0.01 240);
+	--line-soft: oklch(0.88 0.008 240);
+	--foreground: oklch(0.22 0.02 260);
+	--foreground-strong: oklch(0.12 0.02 260);
+	--foreground-muted: oklch(0.48 0.02 260);
+	--inverse-foreground: oklch(0.98 0.005 60);
+	--inverse-surface: oklch(0.22 0.02 260);
+	--accent: oklch(0.55 0.16 250);
+	--accent-soft: oklch(0.55 0.16 250 / 0.1);
+	--danger: oklch(0.58 0.18 25);
+	--danger-surface: oklch(0.94 0.06 25);
+	--success: oklch(0.48 0.12 154);
+	--warning: oklch(0.52 0.13 72);
+	--shadow-color: oklch(0.22 0.02 260 / 0.16);
+
+	--surface-base: var(--shell);
+	--surface-raised: var(--shell-raised);
+	--text-primary: var(--foreground-strong);
+	--text-muted: var(--foreground-muted);
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+	width: 100%;
+	height: 100%;
+	margin: 0;
+	overflow: hidden;
+}
+
+body {
+	min-width: 720px;
+	min-height: 520px;
+	color: var(--foreground);
+	background: var(--shell);
+}
+
+button,
+textarea,
+input,
+select {
+	font: inherit;
+}
+
+button {
+	color: inherit;
+}
+
+button:focus-visible,
+textarea:focus-visible,
+input:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+button:disabled,
+input:disabled,
+textarea:disabled,
+select:disabled {
+	cursor: default;
+	opacity: 0.38;
+}
+
+::selection {
+	color: var(--foreground-strong);
+	background: color-mix(in oklab, var(--accent) 32%, transparent);
+}
+
+* {
+	scrollbar-color: var(--line) transparent;
+	scrollbar-width: thin;
+}
+
+.sr-only {
+	position: absolute !important;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
+}
+
+@keyframes spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		scroll-behavior: auto !important;
+		animation-duration: 0.001ms !important;
+		transition-duration: 0.001ms !important;
+	}
+}
+
+@media (forced-colors: active) {
+	button:focus-visible,
+	textarea:focus-visible,
+	input:focus-visible,
+	select:focus-visible,
+	summary:focus-visible {
+		outline: 2px solid CanvasText;
+	}
+}
