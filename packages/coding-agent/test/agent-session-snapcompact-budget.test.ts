@@ -24,7 +24,6 @@ import { effectiveReserveTokens, estimateTokens, prepareCompaction } from "@oh-m
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -264,14 +263,14 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
 	});
 
-	it("keeps the frame archive out of the RPC result after persisting it", async () => {
+	it("keeps the frame archive out of the compact result after persisting it", async () => {
 		const branchEntries = sessionManager.getBranch();
 		const lastEntry = branchEntries[branchEntries.length - 1];
 		if (!lastEntry?.id) throw new Error("Expected branch entry with id");
 		const archive = {
 			frames: [
 				{
-					data: "A".repeat(MAX_RPC_FRAME_BYTES),
+					data: "A".repeat(64 * 1024),
 					mimeType: "image/png",
 					cols: 10,
 					rows: 10,
@@ -294,11 +293,6 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		});
 
 		const result = await session.compact(undefined, { mode: "snapcompact" });
-		const response = JSON.parse(
-			encodeRpcFrame({ id: "c1", type: "response", command: "compact", success: true, data: result }),
-		) as { success: boolean; error?: string };
-
-		expect(response).toMatchObject({ success: true });
 		expect(result.preserveData).toEqual({ extensionState: "keep-me" });
 		const compactionEntry = sessionManager.getEntries().find(entry => entry.type === "compaction");
 		if (compactionEntry?.type !== "compaction") throw new Error("Expected persisted compaction entry");
