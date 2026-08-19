@@ -82,6 +82,16 @@ jobs:
             fi
           done
 
+          # Keep the union of fork-only and upstream Bun patches. Upstream's
+          # 17.3.7 manifest adds the Puppeteer 25.3 patch, while Gradivus still
+          # carries its Electron Forge patches for the desktop package.
+          if git cat-file -e "$BASE_SHA:patches" 2>/dev/null; then
+            git checkout "$BASE_SHA" -- patches
+          fi
+          if git cat-file -e "upstream-main:patches" 2>/dev/null; then
+            git checkout upstream-main -- patches
+          fi
+
           if git cat-file -e "upstream-main:MODULE.bazel.lock" 2>/dev/null; then
             git checkout upstream-main -- MODULE.bazel.lock
           fi
