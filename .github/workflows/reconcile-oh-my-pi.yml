@@ -32,7 +32,7 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Rebase fork deltas onto the upstream implementations
+      - name: Rebase fork deltas onto upstream implementations
         shell: bash
         run: |
           set -euo pipefail
@@ -44,18 +44,14 @@ jobs:
 
           reconcile_path() {
             local path="$1"
-            local slug
-            slug="$(printf '%s' "$path" | tr '/ ' '__')"
-            local patch="/tmp/${slug}.patch"
+            local patch="/tmp/$(printf '%s' "$path" | tr '/ ' '__').patch"
             git diff --binary --full-index "$SHARED_BASE" "$GRADIVUS_BASE" -- "$path" > "$patch"
-
             if git cat-file -e "upstream-17.3.7:$path" 2>/dev/null; then
               git checkout upstream-17.3.7 -- "$path"
             else
               git rm -r -f --ignore-unmatch -- "$path"
             fi
             git add -A -- "$path"
-
             if [ -s "$patch" ]; then
               echo "Applying Gradivus delta for $path"
               git apply --3way --index --whitespace=nowarn "$patch" || true
@@ -63,54 +59,137 @@ jobs:
           }
 
           reconcile_path packages/ai
+          reconcile_path packages/coding-agent/src/main.ts
+          reconcile_path packages/coding-agent/src/launch
+          reconcile_path packages/coding-agent/src/mcp/transports/http.ts
+          reconcile_path packages/coding-agent/src/prompts/tools/browser.md
+          reconcile_path packages/coding-agent/src/prompts/tools/image-gen.md
+          reconcile_path packages/coding-agent/src/sdk.ts
+          reconcile_path packages/coding-agent/src/tools/image-gen.ts
 
-          # Upstream added dedicated and cross-provider auth-availability APIs
-          # at the same insertion point where Gradivus added runtime OAuth
-          # account routing. The conflict is additive: retain the Gradivus
-          # policy methods first, followed by upstream's hasAuth/
-          # hasResolvableAuth implementation and documentation.
+          # The gRPC RPC transport and Playwright/workspace browser runtime are
+          # Gradivus architecture, not conflict resolutions. Keep those target
+          # implementations authoritative and adapt them after static checking.
+
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          path = Path("packages/ai/src/auth-storage.ts")
-          text = path.read_text()
           pattern = re.compile(
               r"<<<<<<< ours\n(?P<ours>.*?)=======\n(?P<theirs>.*?)>>>>>>> theirs\n",
               re.DOTALL,
           )
-          matches = list(pattern.finditer(text))
-          if len(matches) != 1:
-              raise SystemExit(f"expected one auth-storage conflict, found {len(matches)}")
-          match = matches[0]
-          ours = match.group("ours").strip("\n")
-          theirs = match.group("theirs").strip("\n")
-          text = text[:match.start()] + theirs + "\n\n" + ours + "\n" + text[match.end():]
-          path.write_text(text)
-          PY
-          git add packages/ai/src/auth-storage.ts
 
-          reconcile_path packages/coding-agent/src/main.ts
-          reconcile_path packages/coding-agent/src/launch
-          reconcile_path packages/coding-agent/src/mcp/transports/http.ts
-          reconcile_path packages/coding-agent/src/modes/rpc
-          reconcile_path packages/coding-agent/src/prompts/tools/browser.md
-          reconcile_path packages/coding-agent/src/prompts/tools/image-gen.md
-          reconcile_path packages/coding-agent/src/sdk.ts
-          reconcile_path packages/coding-agent/src/tools/browser.ts
-          reconcile_path packages/coding-agent/src/tools/browser
-          reconcile_path packages/coding-agent/src/tools/image-gen.ts
-          reconcile_path packages/coding-agent/test
+          def resolve(path_name: str, expected: int, resolver):
+              path = Path(path_name)
+              text = path.read_text()
+              matches = list(pattern.finditer(text))
+              if len(matches) != expected:
+                  raise SystemExit(f"{path_name}: expected {expected} conflicts, found {len(matches)}")
+              pieces = []
+              cursor = 0
+              for index, match in enumerate(matches):
+                  pieces.append(text[cursor:match.start()])
+                  ours = match.group("ours").strip("\n")
+                  theirs = match.group("theirs").strip("\n")
+                  pieces.append(resolver(index, ours, theirs).rstrip("\n") + "\n")
+                  cursor = match.end()
+              pieces.append(text[cursor:])
+              path.write_text("".join(pieces))
+
+          resolve(
+              "packages/ai/src/auth-storage.ts",
+              1,
+              lambda _i, ours, theirs: f"{theirs}\n\n{ours}",
+          )
+
+          resolve(
+              "packages/coding-agent/src/launch/broker.ts",
+              1,
+              lambda _i, _ours, _theirs: '''\tconst requestedRestartBackoffBaseMs = options.restartBackoffBaseMs ?? RESTART_BACKOFF_BASE_MS;
+          \tconst restartBackoffBaseMs =
+          \t\tNumber.isFinite(requestedRestartBackoffBaseMs) && requestedRestartBackoffBaseMs >= 0
+          \t\t\t? requestedRestartBackoffBaseMs
+          \t\t\t: RESTART_BACKOFF_BASE_MS;
+          \tawait ensureSecureRuntimeRoot(runtimeDir);
+          \tconst lease = await acquireBrokerLease(runtimeDir);
+          \tif (!lease) return;
+          \tsetProcessName("omp daemon broker");
+          \t// Reclaim sibling daemon scopes left behind by dead brokers without delaying clients.
+          \tvoid pruneDeadDaemonRuntimeDirs(runtimeDir).catch(error => {
+          \t\tlogger.warn("Daemon runtime prune failed", {
+          \t\t\terror: error instanceof Error ? error.message : String(error),
+          \t\t});
+          \t});
+          \tconst token = await readControlToken(runtimeDir, TOKEN_FILE);''',
+          )
+
+          resolve(
+              "packages/coding-agent/src/launch/presence.ts",
+              1,
+              lambda _i, _ours, _theirs: 'import { captureProcessIdentity, inspectProcessIdentity, isEisdir, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";',
+          )
+
+          resolve(
+              "packages/coding-agent/src/main.ts",
+              1,
+              lambda _i, _ours, _theirs: '''\t// Resolve auth before settings so startup errors remain actionable, then
+          \t// install the persisted Gradivus account-routing policy before the
+          \t// model registry performs its first availability lookup.
+          \tlet authStorage: AuthStorage;
+          \ttry {
+          \t\tauthStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
+          \t} catch (error) {
+          \t\tconst message = await describeAuthBrokerStartupError(error);
+          \t\tif (message === null) throw error;
+          \t\tprocess.stderr.write(`${chalk.red(`Error: ${message}`)}\\n`);
+          \t\tprocess.exit(1);
+          \t}''',
+          )
+
+          resolve(
+              "packages/coding-agent/src/mcp/transports/http.ts",
+              1,
+              lambda _i, _ours, _theirs: 'import { logger, readSseEvents, readSseJson, untilAborted } from "@oh-my-pi/pi-utils";',
+          )
+
+          resolve(
+              "packages/coding-agent/src/prompts/tools/browser.md",
+              1,
+              lambda _i, _ours, _theirs: '''- `app.relay: true` → drive the user's own external Chrome tabs via the omp browser relay (auto-started; needs the OMP Browser Relay extension installed). `app.target` picks a tab by URL/title substring; without it the visible tab is adopted without stealing focus.
+          - `close` releases the named tool session. It closes tool-owned headless pages and owned cmux surfaces, but NEVER closes pages in CDP-connected or relay browsers. Spawned-browser pages remain open unless `kill: true` terminates their process.
+          - Selectors: CSS, Playwright selector engines, and `aria/…`, `text/…`, `xpath/…`, `pierce/…` namespaces are supported. Legacy `p-aria/`, `p-text/`, `p-xpath/`, and `p-pierce/` prefixes are normalized; unsupported `p-*` prefixes are rejected.''',
+          )
+
+          resolve(
+              "packages/coding-agent/src/prompts/tools/image-gen.md",
+              1,
+              lambda _i, _ours, theirs: theirs,
+          )
+
+          resolve(
+              "packages/coding-agent/src/sdk.ts",
+              2,
+              lambda _i, ours, theirs: f"{ours}\n{theirs}",
+          )
+
+          resolve(
+              "packages/coding-agent/src/tools/image-gen.ts",
+              1,
+              lambda _i, _ours, _theirs: '''\t\theaders.set("User-Agent", USER_AGENT);
+          \t\tif (stream) headers.set("Accept", "text/event-stream");''',
+          )
+          PY
+
+          git add packages/ai packages/coding-agent/src/main.ts packages/coding-agent/src/launch \
+            packages/coding-agent/src/mcp/transports/http.ts packages/coding-agent/src/prompts/tools/browser.md \
+            packages/coding-agent/src/prompts/tools/image-gen.md packages/coding-agent/src/sdk.ts \
+            packages/coding-agent/src/tools/image-gen.ts
 
           conflicts="$(git diff --name-only --diff-filter=U)"
           if [ -n "$conflicts" ]; then
-            echo "Three-way reconciliation left conflicts:" >&2
+            echo "Unresolved reconciliation conflicts:" >&2
             printf '%s\n' "$conflicts" >&2
-            while IFS= read -r file; do
-              [ -n "$file" ] || continue
-              echo "----- $file -----" >&2
-              grep -n -B 18 -A 28 '^<<<<<<<\|^=======\|^>>>>>>>' "$file" >&2 || true
-            done <<< "$conflicts"
             exit 1
           fi
           git diff --cached --check
