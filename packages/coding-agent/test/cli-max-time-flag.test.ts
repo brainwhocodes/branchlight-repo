@@ -101,7 +101,7 @@ describe("parseArgs — --max-time flag", () => {
 
 	it("converts maxTime to an absolute session deadline", async () => {
 		using tempDir = TempDir.createSync("@omp-max-time-");
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
 		let observedOptions: CreateAgentSessionOptions | undefined;
 		const parsed = parseArgs(["--max-time", "3", "--print", "hello"]);

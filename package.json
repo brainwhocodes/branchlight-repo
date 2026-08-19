@@ -7,7 +7,8 @@
   "patchedDependencies": {
     "@ark/schema@0.56.2": "patches/@ark%2Fschema@0.56.2.patch",
     "@electron-forge/core-utils@7.11.2": "patches/@electron-forge%2Fcore-utils@7.11.2.patch",
-    "@electron-forge/plugin-vite@7.11.2": "patches/@electron-forge%2Fplugin-vite@7.11.2.patch"
+    "@electron-forge/plugin-vite@7.11.2": "patches/@electron-forge%2Fplugin-vite@7.11.2.patch",
+    "puppeteer-core@25.3.0": "patches/puppeteer-core@25.3.0.patch"
   },
   "workspaces": {
     "packages": [
@@ -33,22 +34,22 @@
       "@huggingface/transformers": "^4.2.0",
       "@modelcontextprotocol/sdk": "1.30.0",
       "@napi-rs/cli": "3.7.2",
-      "@oh-my-pi/hashline": "17.2.12",
-      "@oh-my-pi/omp-stats": "17.2.12",
-      "@oh-my-pi/omptype": "17.2.12",
-      "@oh-my-pi/pi-agent-core": "17.2.12",
-      "@oh-my-pi/pi-ai": "17.2.12",
+      "@oh-my-pi/hashline": "17.3.7",
+      "@oh-my-pi/omp-stats": "17.3.7",
+      "@oh-my-pi/omptype": "17.3.7",
+      "@oh-my-pi/pi-agent-core": "17.3.7",
+      "@oh-my-pi/pi-ai": "17.3.7",
       "@oh-my-pi/pi-browser-runtime": "17.2.12",
-      "@oh-my-pi/pi-catalog": "17.2.12",
-      "@oh-my-pi/pi-coding-agent": "17.2.12",
+      "@oh-my-pi/pi-catalog": "17.3.7",
+      "@oh-my-pi/pi-coding-agent": "17.3.7",
       "@oh-my-pi/pi-grpc": "17.2.12",
-      "@oh-my-pi/pi-mnemopi": "17.2.12",
-      "@oh-my-pi/pi-natives": "17.2.12",
-      "@oh-my-pi/pi-tui": "17.2.12",
-      "@oh-my-pi/pi-utils": "17.2.12",
-      "@oh-my-pi/pi-wire": "17.2.12",
+      "@oh-my-pi/pi-mnemopi": "17.3.7",
+      "@oh-my-pi/pi-natives": "17.3.7",
+      "@oh-my-pi/pi-tui": "17.3.7",
+      "@oh-my-pi/pi-utils": "17.3.7",
+      "@oh-my-pi/pi-wire": "17.3.7",
       "@oh-my-pi/pi-workspace-runtime": "17.2.12",
-      "@oh-my-pi/snapcompact": "17.2.12",
+      "@oh-my-pi/snapcompact": "17.3.7",
       "@opentelemetry/api": "^1.9.1",
       "@opentelemetry/api-logs": "^0.220.0",
       "@opentelemetry/context-async-hooks": "^2.9.0",
@@ -100,14 +101,15 @@
       "typescript": "^7.0.2",
       "vite": "^8.1.4",
       "vite-plugin-solid": "^2.11.12",
-      "vitest": "4.1.10"
+      "vitest": "4.1.10",
+      "puppeteer-core": "25.3.0"
     }
   },
   "overrides": {
     "@ark/schema": "0.56.2"
   },
   "scripts": {
-    "setup": "bun install && bun run build:native && bun --cwd=packages/coding-agent link && sh scripts/link-omp.sh",
+    "setup": "bun scripts/setup.ts",
     "dev": "bun --cwd=packages/coding-agent src/cli.ts",
     "dev:timing": "PI_TIMING=x bun --cwd=packages/coding-agent --preload ../utils/src/module-timer.ts src/cli.ts",
     "stats": "bun --cwd=packages/coding-agent src/cli.ts stats",
@@ -127,7 +129,7 @@
     "build:native": "bun --cwd=packages/natives run build",
     "test": "bun scripts/ci-test-ts.ts local",
     "test:ts": "bun scripts/ci-test-ts.ts local-ts",
-    "test:scripts": "bun test scripts/ci-release-build-binaries.test.ts scripts/musl-release.test.ts scripts/ci-release-publish.test.ts scripts/release.test.ts",
+    "test:scripts": "bun test scripts/ci-test-ts.test.ts scripts/ci-release-build-binaries.test.ts scripts/musl-release.test.ts scripts/ci-release-publish.test.ts scripts/release.test.ts",
     "test:rs": "bun scripts/run-rs-task.ts test:rs",
     "test:go": "go -C go/omp-rpc test ./...",
     "check": "bun run --parallel check:ts check:rs",
@@ -205,7 +207,8 @@
     "gen:mupdf:reset": "bun --cwd=packages/coding-agent run gen:mupdf:reset",
     "gen:native": "bun --cwd=packages/natives run gen:native",
     "gen:native:reset": "bun --cwd=packages/natives run gen:native:reset",
-    "check-spoofed-versions": "bun scripts/check-spoofed-versions.ts"
+    "check-spoofed-versions": "bun scripts/check-spoofed-versions.ts",
+    "gen:nix": "bun scripts/gen-nix-bun.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",

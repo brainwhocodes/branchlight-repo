@@ -1,8 +1,9 @@
 // OS-agnostic "which" helper with robust macOS toolchain lookup and flexible cache control.
 //
-// - Falls back to macOS Xcode/CLT toolchain directories if standard `Bun.which()` fails on Darwin.
+// - Falls back to macOS Xcode/CLT toolchain directories if standard lookup fails on Darwin.
 //   Resolves the active developer directory via $DEVELOPER_DIR / /var/db/xcode_select_link symlink
 //   to avoid spawning xcrun subprocesses.
+// - Uses Bun.which() when available and a filesystem PATH lookup in Node-based hosts and tests.
 // - Supports four cache modes (`none`, `fresh`, `ro`, `cached`) for control over discovery cost and determinism.
 // - Computes a stable cache key from command + options to avoid redundant lookups within a process.
 // - Returns path to resolved binary or null if not found.
@@ -14,9 +15,13 @@ import * as path from "node:path";
 
 type CacheKey = string | bigint | number;
 
+interface BunWhichRuntime {
+	which(command: string, options?: Bun.WhichOptions): string | null;
+}
+
 // Tools shipped by Xcode / Command Line Tools that callers actually look up.
 // Keeps the set small so darwinWhich can fast-reject non-Xcode commands without
-// touching the filesystem.  Only needs entries for binaries that live *exclusively*
+// touching the filesystem. Only needs entries for binaries that live exclusively
 // in toolchain dirs (not on a typical $PATH).
 const XCODE_BINS = new Set([
 	// Compilers & driver aliases
@@ -181,10 +186,43 @@ export interface WhichOptions extends Bun.WhichOptions {
 	cache?: WhichCachePolicy;
 }
 
+function nodeWhich(command: string, options?: Bun.WhichOptions): string | null {
+	const cwd = options?.cwd ? String(options.cwd) : process.cwd();
+	const pathValue = options?.PATH ?? process.env.PATH ?? "";
+	const hasPathSeparator = command.includes("/") || command.includes("\\");
+	const candidates = hasPathSeparator
+		? [path.isAbsolute(command) ? command : path.resolve(cwd, command)]
+		: pathValue.split(path.delimiter).map(directory => path.resolve(cwd, directory || cwd, command));
+	const extensions =
+		process.platform === "win32" && path.extname(command) === ""
+			? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+			: [""];
+
+	for (const baseCandidate of candidates) {
+		for (const extension of extensions) {
+			const candidate = extension ? `${baseCandidate}${extension}` : baseCandidate;
+			try {
+				if (!fs.statSync(candidate).isFile()) continue;
+				if (process.platform !== "win32") fs.accessSync(candidate, fs.constants.X_OK);
+				return candidate;
+			} catch {
+				// Continue searching PATH entries and Windows executable extensions.
+			}
+		}
+	}
+	return null;
+}
+
+function runtimeWhich(command: string, options?: Bun.WhichOptions): string | null {
+	const runtimeBun = (globalThis as typeof globalThis & { Bun?: BunWhichRuntime }).Bun;
+	if (runtimeBun) return runtimeBun.which(command, options);
+	return nodeWhich(command, options);
+}
+
 // Darwin-specific "which" shim: consult Xcode/CLT toolchain directories after $PATH.
 // Uses cached directory listings instead of per-command existsSync or xcrun subprocesses.
 function darwinWhich(command: string, options?: Bun.WhichOptions): string | null {
-	const regular = Bun.which(command, options);
+	const regular = runtimeWhich(command, options);
 	if (regular) return regular;
 	if (isXcodeBin(command)) {
 		return getMacosToolPaths().get(command) ?? null;
@@ -192,17 +230,15 @@ function darwinWhich(command: string, options?: Bun.WhichOptions): string | null
 	return null;
 }
 
-// Which function that incorporates Darwin Xcode logic if platform reports as 'darwin'
-export const whichFresh = os.platform() === "darwin" ? darwinWhich : Bun.which;
+// Which function that incorporates Darwin Xcode logic if platform reports as 'darwin'.
+export const whichFresh = os.platform() === "darwin" ? darwinWhich : runtimeWhich;
 
-// Derive stable cache key from command and lookup options
+// Derive a stable cache key from command and lookup options without requiring
+// the Bun runtime during Node-based desktop tests.
 function cacheKey(command: string, options?: Bun.WhichOptions): CacheKey {
 	if (!options) return command;
 	if (!options.cwd && !options.PATH) return command;
-	let h = Bun.hash(command);
-	if (options.cwd) h = Bun.hash(options.cwd, h);
-	if (options.PATH) h = Bun.hash(options.PATH, h);
-	return h;
+	return `${command}\u0000${String(options.cwd ?? "")}\u0000${options.PATH ?? ""}`;
 }
 
 /**
