@@ -20,6 +20,7 @@ jobs:
     env:
       BASE_SHA: a2f248a775e3ee225cfed5ed713ed01c72a154f8
       UPSTREAM_SHA: 565d53515b54df32fada2564d1fe9caf1a17b738
+      UPSTREAM_VERSION: 17.3.7
       SYNC_BRANCH: sync/oh-my-pi-17.3.7
     steps:
       - uses: actions/checkout@v4
@@ -82,9 +83,6 @@ jobs:
             fi
           done
 
-          # Keep the union of fork-only and upstream Bun patches. Upstream's
-          # 17.3.7 manifest adds the Puppeteer 25.3 patch, while Gradivus still
-          # carries its Electron Forge patches for the desktop package.
           if git cat-file -e "$BASE_SHA:patches" 2>/dev/null; then
             git checkout "$BASE_SHA" -- patches
           fi
@@ -186,11 +184,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          upstream_version="$(git show upstream-main:VERSION | tr -d '\r\n')"
           rm -f .github/workflows/sync-oh-my-pi.yml
           git add -A
           git diff --cached --check
-          git commit -m "sync: merge Oh My Pi ${upstream_version}" \
+          git commit -m "sync: merge Oh My Pi ${UPSTREAM_VERSION}" \
             -m "Merge upstream ${UPSTREAM_SHA} while preserving Gradivus desktop, gRPC, browser-runtime, workspace-runtime, and release-policy integration points."
           git push origin "HEAD:${SYNC_BRANCH}"
 
