@@ -16,30 +16,120 @@ jobs:
   reconcile:
     if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.head_ref == 'sync/oh-my-pi-17.3.7')
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 90
     env:
       SHARED_BASE: 6fb07028fd61eec6a8269ce037ba354798005644
       GRADIVUS_BASE: a2f248a775e3ee225cfed5ed713ed01c72a154f8
       UPSTREAM_SHA: 565d53515b54df32fada2564d1fe9caf1a17b738
+      SYNC_BRANCH: sync/oh-my-pi-17.3.7
     steps:
       - uses: actions/checkout@v4
         with:
           ref: sync/oh-my-pi-17.3.7
           fetch-depth: 0
 
-      - name: Print auth-storage three-way conflict hunks
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Rebase fork deltas onto the upstream implementations
         shell: bash
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/can1357/oh-my-pi.git
           git fetch --no-tags upstream "$UPSTREAM_SHA"
           git branch -f upstream-17.3.7 FETCH_HEAD
-          git diff --binary --full-index "$SHARED_BASE" "$GRADIVUS_BASE" -- packages/ai > /tmp/gradivus-ai.patch
-          git checkout upstream-17.3.7 -- packages/ai
-          git add -A -- packages/ai
-          git apply --3way --index --whitespace=nowarn /tmp/gradivus-ai.patch || true
-          echo "Conflict files:"
-          git diff --name-only --diff-filter=U
-          echo "auth-storage conflict markers:"
-          grep -n -B 24 -A 40 '^<<<<<<<\|^=======\|^>>>>>>>' packages/ai/src/auth-storage.ts || true
-          exit 1
+
+          reconcile_path() {
+            local path="$1"
+            local slug
+            slug="$(printf '%s' "$path" | tr '/ ' '__')"
+            local patch="/tmp/${slug}.patch"
+            git diff --binary --full-index "$SHARED_BASE" "$GRADIVUS_BASE" -- "$path" > "$patch"
+
+            if git cat-file -e "upstream-17.3.7:$path" 2>/dev/null; then
+              git checkout upstream-17.3.7 -- "$path"
+            else
+              git rm -r -f --ignore-unmatch -- "$path"
+            fi
+            git add -A -- "$path"
+
+            if [ -s "$patch" ]; then
+              echo "Applying Gradivus delta for $path"
+              git apply --3way --index --whitespace=nowarn "$patch" || true
+            fi
+          }
+
+          reconcile_path packages/ai
+
+          # Upstream added dedicated and cross-provider auth-availability APIs
+          # at the same insertion point where Gradivus added runtime OAuth
+          # account routing. The conflict is additive: retain the Gradivus
+          # policy methods first, followed by upstream's hasAuth/
+          # hasResolvableAuth implementation and documentation.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("packages/ai/src/auth-storage.ts")
+          text = path.read_text()
+          pattern = re.compile(
+              r"<<<<<<< ours\n(?P<ours>.*?)=======\n(?P<theirs>.*?)>>>>>>> theirs\n",
+              re.DOTALL,
+          )
+          matches = list(pattern.finditer(text))
+          if len(matches) != 1:
+              raise SystemExit(f"expected one auth-storage conflict, found {len(matches)}")
+          match = matches[0]
+          ours = match.group("ours").strip("\n")
+          theirs = match.group("theirs").strip("\n")
+          text = text[:match.start()] + theirs + "\n\n" + ours + "\n" + text[match.end():]
+          path.write_text(text)
+          PY
+          git add packages/ai/src/auth-storage.ts
+
+          reconcile_path packages/coding-agent/src/main.ts
+          reconcile_path packages/coding-agent/src/launch
+          reconcile_path packages/coding-agent/src/mcp/transports/http.ts
+          reconcile_path packages/coding-agent/src/modes/rpc
+          reconcile_path packages/coding-agent/src/prompts/tools/browser.md
+          reconcile_path packages/coding-agent/src/prompts/tools/image-gen.md
+          reconcile_path packages/coding-agent/src/sdk.ts
+          reconcile_path packages/coding-agent/src/tools/browser.ts
+          reconcile_path packages/coding-agent/src/tools/browser
+          reconcile_path packages/coding-agent/src/tools/image-gen.ts
+          reconcile_path packages/coding-agent/test
+
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$conflicts" ]; then
+            echo "Three-way reconciliation left conflicts:" >&2
+            printf '%s\n' "$conflicts" >&2
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
+              echo "----- $file -----" >&2
+              grep -n -B 18 -A 28 '^<<<<<<<\|^=======\|^>>>>>>>' "$file" >&2 || true
+            done <<< "$conflicts"
+            exit 1
+          fi
+          git diff --cached --check
+
+      - name: Validate reconciled TypeScript and desktop workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run ci:check:full
+          bun --cwd=packages/desktop run check
+          bun --cwd=packages/desktop run test
+
+      - name: Commit reconciled port
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/reconcile-oh-my-pi.yml
+          git add -A
+          git diff --cached --check
+          git commit -m "fix(sync): reconcile Gradivus integrations with Oh My Pi 17.3.7"
+          git push origin "HEAD:${SYNC_BRANCH}"
