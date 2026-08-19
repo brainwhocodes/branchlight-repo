@@ -167,6 +167,14 @@ jobs:
           set -euo pipefail
           bun install --frozen-lockfile
           bun run ci:check:full
+
+          native_temp="$(mktemp -d)"
+          native_tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@17.3.7 dist.tarball 2>/dev/null || npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
+          curl -fsSL --retry 3 "$native_tarball" | tar -xz -C "$native_temp"
+          mkdir -p packages/natives/native
+          cp "$native_temp/package/pi_natives.linux-x64-baseline.node" packages/natives/native/
+          cp "$native_temp/package/pi_natives.linux-x64-modern.node" packages/natives/native/
+
           bun --cwd=packages/desktop run check
           bun --cwd=packages/desktop run test
 
