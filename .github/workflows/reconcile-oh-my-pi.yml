@@ -4,13 +4,17 @@ on:
   push:
     branches:
       - sync/oh-my-pi-17.3.7
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
   reconcile:
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.head_ref == 'sync/oh-my-pi-17.3.7')
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
