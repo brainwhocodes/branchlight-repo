@@ -128,12 +128,32 @@ jobs:
           resolve("packages/coding-agent/src/sdk.ts", 2, lambda i, ours, theirs: f"{theirs}\n{ours}" if i == 0 else f"{ours}\n{theirs}")
           resolve("packages/coding-agent/src/tools/image-gen.ts", 1, lambda _i, _o, _t: '''\t\theaders.set("User-Agent", USER_AGENT);
           \t\tif (stream) headers.set("Accept", "text/event-stream");''')
+
+          snap_path = Path("packages/coding-agent/test/agent-session-snapcompact-budget.test.ts")
+          snap = snap_path.read_text()
+          snap = snap.replace('import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";\n', '')
+          snap = snap.replace('it("keeps the frame archive out of the RPC result after persisting it", async () => {', 'it("keeps the frame archive out of the compact result after persisting it", async () => {')
+          snap = snap.replace('data: "A".repeat(MAX_RPC_FRAME_BYTES),', 'data: "A".repeat(64 * 1024),')
+          snap = snap.replace('''\t\tconst response = JSON.parse(
+          \t\t\tencodeRpcFrame({ id: "c1", type: "response", command: "compact", success: true, data: result }),
+          \t\t) as { success: boolean; error?: string };
+
+          \t\texpect(response).toMatchObject({ success: true });
+          ''', '')
+          snap_path.write_text(snap)
+
+          cli_path = Path("packages/coding-agent/test/cli-max-time-flag.test.ts")
+          cli = cli_path.read_text()
+          if not cli.startswith('import * as path from "node:path";'):
+              cli = 'import * as path from "node:path";\n' + cli
+          cli_path.write_text(cli)
           PY
 
           git add packages/ai packages/coding-agent/src/main.ts packages/coding-agent/src/launch \
             packages/coding-agent/src/mcp/transports/http.ts packages/coding-agent/src/prompts/tools/browser.md \
             packages/coding-agent/src/prompts/tools/image-gen.md packages/coding-agent/src/sdk.ts \
-            packages/coding-agent/src/tools/image-gen.ts
+            packages/coding-agent/src/tools/image-gen.ts packages/coding-agent/test/agent-session-snapcompact-budget.test.ts \
+            packages/coding-agent/test/cli-max-time-flag.test.ts
           test -z "$(git diff --name-only --diff-filter=U)"
           git diff --cached --check
 
