@@ -144,8 +144,12 @@ jobs:
 
           cli_path = Path("packages/coding-agent/test/cli-max-time-flag.test.ts")
           cli = cli_path.read_text()
-          if not cli.startswith('import * as path from "node:path";'):
-              cli = 'import * as path from "node:path";\n' + cli
+          path_import = 'import * as path from "node:path";\n'
+          if path_import not in cli:
+              marker = 'import { describe, expect, it, vi } from "bun:test";\n'
+              if marker not in cli:
+                  raise SystemExit("bun:test import marker missing from cli-max-time test")
+              cli = cli.replace(marker, marker + path_import, 1)
           cli_path.write_text(cli)
           PY
 
