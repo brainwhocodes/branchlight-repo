@@ -4,6 +4,8 @@
   "description": "Minimal oh-my-pi extension example",
   "homepage": "https://omp.sh",
   "omp": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }
