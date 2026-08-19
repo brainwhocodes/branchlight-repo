@@ -4,13 +4,17 @@ on:
   push:
     branches:
       - sync/oh-my-pi-17.3.7
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
   sync:
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' && (github.event_name == 'push' || github.head_ref == 'sync/oh-my-pi-17.3.7')
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
@@ -55,9 +59,6 @@ jobs:
             fi
           done < /tmp/upstream-conflicts.txt
 
-          # These areas define the Gradivus desktop product and its gRPC/browser
-          # integration. Keep them intact even when upstream later grows files
-          # with the same names; upstream updates elsewhere still merge normally.
           preserve_paths=(
             README.md
             .github/workflows/ci.yml
@@ -81,8 +82,6 @@ jobs:
             fi
           done
 
-          # The upstream Bazel module lock must match the imported Rust/Bazel
-          # source graph. Gradivus-specific application packages are Bun workspaces.
           if git cat-file -e "upstream-main:MODULE.bazel.lock" 2>/dev/null; then
             git checkout upstream-main -- MODULE.bazel.lock
           fi
@@ -103,7 +102,6 @@ jobs:
 
           const base = process.env.BASE_SHA!;
           const upstream = "upstream-main";
-
           const isObject = (value: unknown): value is Record<string, unknown> =>
             Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
@@ -137,35 +135,19 @@ jobs:
           }
 
           const listing = await $`git ls-tree -r --name-only ${base}`.text();
-          const paths = listing
-            .split("\n")
-            .filter(path => path === "package.json" || path.endsWith("/package.json"));
-
-          const mapFields = [
-            "scripts",
-            "dependencies",
-            "devDependencies",
-            "peerDependencies",
-            "optionalDependencies",
-            "peerDependenciesMeta",
-            "patchedDependencies",
-            "overrides",
-          ];
+          const paths = listing.split("\n").filter(path => path === "package.json" || path.endsWith("/package.json"));
+          const mapFields = ["scripts", "dependencies", "devDependencies", "peerDependencies", "optionalDependencies", "peerDependenciesMeta", "patchedDependencies", "overrides"];
 
           for (const path of paths) {
             const ours = await showJson(base, path);
             const theirs = await showJson(upstream, path);
             if (!ours || !theirs) continue;
-
             const merged = mergeValues(ours, theirs) as Record<string, unknown>;
             for (const field of mapFields) {
               const oursMap = isObject(ours[field]) ? ours[field] as Record<string, unknown> : {};
               const theirsMap = isObject(theirs[field]) ? theirs[field] as Record<string, unknown> : {};
-              if (Object.keys(oursMap).length || Object.keys(theirsMap).length) {
-                merged[field] = { ...oursMap, ...theirsMap };
-              }
+              if (Object.keys(oursMap).length || Object.keys(theirsMap).length) merged[field] = { ...oursMap, ...theirsMap };
             }
-
             if (path === "package.json") {
               const oursWorkspaces = isObject(ours.workspaces) ? ours.workspaces : {};
               const upstreamWorkspaces = isObject(theirs.workspaces) ? theirs.workspaces : {};
@@ -179,7 +161,6 @@ jobs:
               };
               merged.workspaces = workspaces;
             }
-
             await Bun.write(path, `${JSON.stringify(merged, null, 2)}\n`);
           }
           BUN
